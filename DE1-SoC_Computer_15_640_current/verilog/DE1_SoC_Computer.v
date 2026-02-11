@@ -568,3 +568,131 @@ Computer_System The_System (
 
 
 endmodule
+
+
+//////////////////////////////////////////////////
+//// signed mult of 4.23 format 2'comp////////////
+//////////////////////////////////////////////////
+
+module signed_mult (out, a, b);
+	output 	signed  [26:0]	out;
+	input 	signed	[26:0] 	a;
+	input 	signed	[26:0] 	b;
+	// intermediate full bit length
+	wire 	signed	[53:0]	mult_out;
+	assign mult_out = a * b;
+	// select bits for 4.23 fixed point
+	assign out = {mult_out[53], mult_out[48:23]};
+endmodule
+//////////////////////////////////////////////////
+
+`define ITER_MAX 1000
+
+module iterator (
+	input reset,
+	input clk,
+	input in_val,
+	output reg in_rdy,
+
+	input signed  [26:0] in_c_r,
+	input signed  [26:0] in_c_i,
+
+	output reg signed [$clog2(`ITER_MAX):0] iter_count,
+	output reg out_val,
+	input out_rdy
+);
+	
+	localparam [1:0] IDLE = 2'b00,
+	                 CALC = 2'b01,
+	                 DONE = 2'b10;
+	reg  [1:0] current_state;
+	reg [1:0] next_state;
+
+	reg signed [26:0] zi, zr, zr_sq, zi_sq, c_r, c_i;
+
+	always @(posedge clk) begin
+		case (current_state)
+			IDLE: begin
+				if (in_val) begin
+					c_r <= in_c_r;
+					c_i <= in_c_i;
+					zi <= 27'sd0;
+					zr <= 27'sd0;
+					zr_sq <= 27'sd0;
+					zi_sq <= 27'sd0;
+					iter_count <= 0;
+				end
+			end
+			CALC: begin
+				zi <= zi_next;
+				zr <= zr_next;
+				zr_sq <= zr_sq_next;
+				zi_sq <= zi_sq_next;
+				iter_count <= iter_count + 1;
+			end
+			DONE: begin
+				// Stay in DONE until reset
+			end
+		endcase
+		current_state <= next_state;
+		
+	end	
+
+	always @(*) begin
+		case (current_state)
+			IDLE: begin
+				if (in_val) begin
+					next_state = CALC;
+				end
+				else begin
+					next_state = IDLE;
+					in_rdy = 1'b1;
+					out_val = 1'b0;
+				end
+			end
+			CALC: begin
+				if (escape_condition) begin
+					next_state = DONE;
+				end
+				else begin
+					next_state = CALC;
+					in_rdy = 1'b0;
+					out_val = 1'b0;
+				end
+			end
+			DONE: begin
+				// Stay in DONE until reset
+				next_state = DONE;
+				in_rdy = 1'b0;
+				out_val = 1'b1;
+			end
+			default: begin
+				next_state = IDLE;
+				in_rdy = 1'b1;
+				out_val = 1'b0;
+			end
+		endcase
+	end
+
+	wire escape_condition;
+	wire signed [26:0] zr_next, zi_next, z_mag_sq, zr_sq_next, zi_sq_next, zr_zi;
+
+	
+	assign escape_condition = z_mag_sq > 27'sd4 
+							|| iter_count == `ITER_MAX
+							|| zi_next > 27'sd2 
+							|| zi_next < -27'sd2 
+							|| zr_next > 27'sd2 
+							|| zr_next < -27'sd2; 
+
+	signed_mult mult_zr_zr(zr_sq_next, zr, zr);
+	signed_mult mult_zi_zi(zi_sq_next, zi, zi);
+	signed_mult mult_zr_zi(zr_zi, zr, zi);
+
+	assign zr_next = zr_sq_next - zi_sq_next + c_r;
+	assign zi_next = (zr_zi <<< 1) + c_i;
+
+	assign z_mag_sq = zr_sq_next + zi_sq_next;
+	
+
+endmodule
