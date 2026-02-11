@@ -598,6 +598,7 @@ module iterator (
 	input signed  [26:0] in_c_i,
 
 	output reg signed [$clog2(`ITER_MAX):0] iter_count,
+	output escape_condition,
 	output reg out_val,
 	input out_rdy
 );
@@ -609,6 +610,8 @@ module iterator (
 	reg [1:0] next_state;
 
 	reg signed [26:0] zi, zr, zr_sq, zi_sq, c_r, c_i;
+	//wire escape_condition;
+	wire signed [26:0] zr_next, zi_next, z_mag_sq, zr_sq_next, zi_sq_next, zr_zi;
 
 	always @(posedge clk) begin
 		case (current_state)
@@ -634,6 +637,10 @@ module iterator (
 				// Stay in DONE until reset
 			end
 		endcase
+		if (reset) begin
+			current_state <= IDLE;
+		end
+		else
 		current_state <= next_state;
 		
 	end	
@@ -665,6 +672,9 @@ module iterator (
 				next_state = DONE;
 				in_rdy = 1'b0;
 				out_val = 1'b1;
+				if (out_rdy) begin
+					next_state = IDLE;
+				end
 			end
 			default: begin
 				next_state = IDLE;
@@ -674,16 +684,15 @@ module iterator (
 		endcase
 	end
 
-	wire escape_condition;
-	wire signed [26:0] zr_next, zi_next, z_mag_sq, zr_sq_next, zi_sq_next, zr_zi;
+
 
 	
-	assign escape_condition = z_mag_sq > 27'sd4 
-							|| iter_count == `ITER_MAX
-							|| zi_next > 27'sd2 
-							|| zi_next < -27'sd2 
-							|| zr_next > 27'sd2 
-							|| zr_next < -27'sd2; 
+	assign escape_condition = z_mag_sq > $signed(27'h2000000) 
+							|| iter_count == 1000
+							|| zi_next > $signed(27'h1000000) 
+							|| zi_next < $signed(-27'h1000000) 
+							|| zr_next > $signed(27'h1000000) 
+							|| zr_next < $signed(-27'h1000000); 
 
 	signed_mult mult_zr_zr(zr_sq_next, zr, zr);
 	signed_mult mult_zi_zi(zi_sq_next, zi, zi);
@@ -693,6 +702,4 @@ module iterator (
 	assign zi_next = (zr_zi <<< 1) + c_i;
 
 	assign z_mag_sq = zr_sq_next + zi_sq_next;
-	
-
 endmodule
