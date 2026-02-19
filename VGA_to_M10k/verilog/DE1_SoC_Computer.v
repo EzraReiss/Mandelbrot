@@ -957,9 +957,9 @@ endmodule
 module mandelbrot_top (
 	input reset,
 	input clk,
-	input reg [31:0] x_start,
-	input reg [31:0] y_start,
-	input reg [26:0] pixel_increment,
+	input [31:0] x_start,
+	input [31:0] y_start,
+	input [26:0] pixel_increment,
 
 	// initial load begin	
 	output reg start,
@@ -970,8 +970,8 @@ module mandelbrot_top (
 	// memory write interface
 	output [7:0] mem_write_data,
 	output reg [18:0] mem_write_address,
-	output reg mem_we,
-)
+	output reg mem_we
+);
 
 	// Valid states. Done is when iterator has finished all of its pixels in a frame.	
 	localparam [1:0] CALC = 2'b01,
@@ -984,15 +984,16 @@ module mandelbrot_top (
 	reg [10:0] pixel_x, pixel_y;
 
 
-	wire [18:0] mem_write_address_next;
+	reg [$clog2(`MEM_MAX+1):0] mem_write_address_next;
 
 	// Iterator signals
 	reg iterator_reset;
 	reg iterator_in_val;
-	reg iterator_in_rdy;
-	reg iterator_escape_condition;
-	reg iterator_out_val;
+	wire iterator_in_rdy;
+	wire iterator_escape_condition;
+	wire iterator_out_val;
 	reg iterator_out_rdy;
+	wire iterator_iter_count;
 	// Iterator instance
 	iterator iter1 (
 		.reset(iterator_reset),
@@ -1025,18 +1026,22 @@ module mandelbrot_top (
 			current_state <= CALC;
 			curr_x <= x_start;
 			curr_y <= y_start;
-			pixel_x <= iter_id;
+			pixel_x <= 0;
 			pixel_y <= 0;
 			iterator_reset <= 1'b1;
 			
 			mem_write_address <= 0;
 			mem_write_address_next <= 0;
 			mem_we <= 1'b0;
+
+			iterator_in_val <= 1'b0;
+			iterator_out_rdy <= 1'b0;
 		end	else begin
 			case (current_state)
 				CALC: begin
 					if (iterator_in_rdy) begin
 						iterator_in_val <= 1'b1;
+						iterator_out_rdy <= 1'b0;
 						curr_x <= next_x;
 						curr_y <= next_y;
 						pixel_x <= next_pixel_x;
@@ -1066,8 +1071,8 @@ module mandelbrot_top (
 	end
 
 
-	wire signed [9:0] next_pixel_x, next_pixel_y;
-	wire signed [26:0] next_x, next_y;
+	reg signed [9:0] next_pixel_x, next_pixel_y;
+	reg signed [26:0] next_x, next_y;
 	
 
 	always @(*) begin
@@ -1106,41 +1111,40 @@ module mandelbrot_top (
 endmodule
 
 module color_scheme (
-	input clk;
-	input [$clog2(`ITER_MAX):0] counter //iterator_iter_count 
-	output reg [7:0] color_reg
-
-)
-	always @(posedge clk) begin
+	input clk,
+	input [$clog2(`ITER_MAX):0] counter, //iterator_iter_count 
+	output [7:0] color_reg
+);
+	always @(*) begin
 		if (counter >= `ITER_MAX) begin
-		color_reg <= 8'b_000_000_00 ; // black
+		color_reg = 8'b_000_000_00 ; // black
 		end
 		else if (counter >= (`ITER_MAX >>> 1)) begin
-		color_reg <= 8'b_011_001_00 ; // white
+		color_reg = 8'b_011_001_00 ; // white
 		end
 		else if (counter >= (`ITER_MAX >>> 2)) begin
-		color_reg <= 8'b_011_001_00 ; //idk how this is diff than white lol
+		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
 		end
 		else if (counter >= (`ITER_MAX >>> 3)) begin
-		color_reg <= 8'b_101_010_01 ;
+		color_reg = 8'b_101_010_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 4)) begin
-		color_reg <= 8'b_011_001_01 ;
+		color_reg = 8'b_011_001_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 5)) begin
-		color_reg <= 8'b_001_001_01 ;
+		color_reg = 8'b_001_001_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 6)) begin
-		color_reg <= 8'b_011_010_10 ;
+		color_reg = 8'b_011_010_10 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 7)) begin
-		color_reg <= 8'b_010_100_10 ;
+		color_reg = 8'b_010_100_10 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 8)) begin
-		color_reg <= 8'b_010_100_10 ;
+		color_reg = 8'b_010_100_10 ;
 		end
 		else begin
-		color_reg <= 8'b_010_100_10 ;
+		color_reg = 8'b_010_100_10 ;
 		end
 	end
 endmodule
