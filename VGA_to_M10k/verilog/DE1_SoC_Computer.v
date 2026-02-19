@@ -477,13 +477,13 @@ vga_driver DUT   (	.clock(vga_pll),
 );
 
 wire [26:0] pixel_increment;
-assign pixel_increment = 27'd39000; // Step size approx 0.0046 (x of -2 to 1, y of )
+assign pixel_increment = 27'd39000; // Step size approx 0.0046 (x of -2 to 1, y starts at 1)
 
 mandelbrot_top mandelbrot_unit (
 	.reset(~KEY[0]),
 	.clk(M10k_pll),
-	.x_start(-32'sd134217728), // -2.0 in 4.23 fixed point (approximate)
-	.y_start(-32'sd67108864),  // -1.0 in 4.23 fixed point
+	.x_start(-27'sd16777216), // -2.0 in 4.23 fixed point
+	.y_start(27'sd8388608),   // 1.0 in 4.23 fixed point
 	.pixel_increment(pixel_increment),
 
 	.start(),
@@ -1000,7 +1000,8 @@ module mandelbrot_top (
 	reg [10:0] pixel_x, pixel_y;
 
 
-	reg [$clog2(`MEM_MAX+1):0] mem_write_address_next;
+	reg [10:0] pixel_x, pixel_y;
+//	reg [$clog2(`MEM_MAX+1):0] mem_write_address_next;
 
 	// Iterator signals
 	reg iterator_reset;
@@ -1047,7 +1048,7 @@ module mandelbrot_top (
 			iterator_reset <= 1'b1;
 			
 			mem_write_address <= 0;
-			mem_write_address_next <= 0;
+			// mem_write_address_next <= 0;
 			mem_we <= 1'b0;
 
 			iterator_in_val <= 1'b0;
@@ -1066,8 +1067,8 @@ module mandelbrot_top (
 					else if (iterator_out_val) begin
 						iterator_in_val <= 1'b0;
 						iterator_out_rdy <= 1'b1;
-						mem_write_address_next <= mem_write_address + 1;	
-						mem_write_address <= mem_write_address_next;
+						// mem_write_address_next <= mem_write_address + 1;	
+						mem_write_address <= mem_write_address + 1;
 						mem_we <= 1'b1;
 					end
 					else begin
