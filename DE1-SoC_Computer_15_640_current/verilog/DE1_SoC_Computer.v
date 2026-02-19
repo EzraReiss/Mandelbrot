@@ -688,7 +688,7 @@ module iterator (
 
 	
 	assign escape_condition = z_mag_sq > $signed(27'h2000000) 
-							|| iter_count == 1000
+							|| iter_count == 999
 							|| zi_next > $signed(27'h1000000) 
 							|| zi_next < $signed(-27'h1000000) 
 							|| zr_next > $signed(27'h1000000) 
