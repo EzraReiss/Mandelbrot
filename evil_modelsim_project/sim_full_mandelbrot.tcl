@@ -20,10 +20,10 @@ set tb_src      "mandelbrot_tb.v"
 
 echo "=== Compiling full Mandelbrot simulation ==="
 echo "Compiling $verilog_src into work_mandelbrot ..."
-vlog -work work_mandelbrot $verilog_src
+vlog -work work_mandelbrot -vlog01compat $verilog_src
 
 echo "Compiling $tb_src into work_mandelbrot ..."
-vlog -work work_mandelbrot $tb_src
+vlog -work work_mandelbrot -vlog01compat $tb_src
 
 # ---- Simulate from the mandelbrot library ----
 echo "Starting simulation (work_mandelbrot.mandelbrot_tb)..."

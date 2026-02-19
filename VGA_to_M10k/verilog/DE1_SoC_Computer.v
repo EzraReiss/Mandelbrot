@@ -1046,7 +1046,7 @@ module mandelbrot_top (
 		end	else begin
 			// Deassert iterator reset after first cycle out of reset
 			iterator_reset <= 1'b0;
-
+			current_state <= next_state;
 			case (current_state)
 				CALC: begin
 					if (iterator_in_rdy && !iterator_in_val) begin
