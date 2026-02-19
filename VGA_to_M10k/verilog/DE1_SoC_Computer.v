@@ -908,31 +908,24 @@ module iterator (
 	end	
 
 	always @(*) begin
+		// Default assignments to prevent inferred latches
+		next_state = current_state;
+		in_rdy = 1'b0;
+		out_val = 1'b0;
+
 		case (current_state)
 			IDLE: begin
+				in_rdy = 1'b1;
 				if (in_val) begin
 					next_state = CALC;
-				end
-				else begin
-					next_state = IDLE;
-					in_rdy = 1'b1;
-					out_val = 1'b0;
 				end
 			end
 			CALC: begin
 				if (escape_condition) begin
 					next_state = DONE;
 				end
-				else begin
-					next_state = CALC;
-					in_rdy = 1'b0;
-					out_val = 1'b0;
-				end
 			end
 			DONE: begin
-				// Stay in DONE until value received
-				next_state = DONE;
-				in_rdy = 1'b0;
 				out_val = 1'b1;
 				if (out_rdy) begin
 					next_state = IDLE;
@@ -941,7 +934,6 @@ module iterator (
 			default: begin
 				next_state = IDLE;
 				in_rdy = 1'b1;
-				out_val = 1'b0;
 			end
 		endcase
 	end
@@ -1000,7 +992,6 @@ module mandelbrot_top (
 	reg [10:0] pixel_x, pixel_y;
 
 
-	reg [10:0] pixel_x, pixel_y;
 //	reg [$clog2(`MEM_MAX+1):0] mem_write_address_next;
 
 	// Iterator signals
@@ -1028,7 +1019,7 @@ module mandelbrot_top (
 
 
 	// Color scheme instance
-	reg [7:0] color_reg;
+	wire [7:0] color_reg;
 	assign mem_write_data = color_reg;
 	color_scheme cs1 (
 		.clk(clk),
@@ -1111,7 +1102,7 @@ module mandelbrot_top (
 	always @(*) begin
 		case (current_state)
 			CALC: begin
-				if ( iterator_out_val && mem_write_address_next == `MEM_MAX) begin
+				if ( iterator_out_val && mem_write_address == `MEM_MAX) begin
 					next_state = DONE;
 				end
 				else begin
@@ -1130,7 +1121,7 @@ endmodule
 module color_scheme (
 	input clk,
 	input [$clog2(`ITER_MAX):0] counter, //iterator_iter_count 
-	output [7:0] color_reg
+	output reg [7:0] color_reg
 );
 	always @(*) begin
 		if (counter >= `ITER_MAX) begin
