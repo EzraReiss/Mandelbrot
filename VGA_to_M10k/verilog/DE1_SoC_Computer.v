@@ -1075,7 +1075,7 @@ module mandelbrot_top (
 					end
 					else begin
 						iterator_in_val <= 1'b0;
-						iterator_out_rdy <= 1'b0;
+						iterator_out_rdy <= 1'b1;
 						mem_we <= 1'b0;
 					end
 
