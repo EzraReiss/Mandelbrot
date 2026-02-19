@@ -483,7 +483,7 @@ mandelbrot_top mandelbrot_unit (
 	.reset(~KEY[0]),
 	.clk(M10k_pll),
 	.x_start(-27'sd16777216), // -2.0 in 4.23 fixed point
-	.y_start(27'sd9360000),   // +1.115 = 240*39000, centers y=0 on row 240
+	.y_start(27'sd9340500),   // 479*39000/2: rows 0 & 479 exactly mirror, rows 239/240 straddle y=0
 	.pixel_increment(pixel_increment),
 
 	.start(),
