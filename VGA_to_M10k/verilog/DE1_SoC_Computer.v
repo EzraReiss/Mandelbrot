@@ -476,8 +476,8 @@ vga_driver DUT   (	.clock(vga_pll),
 							.blank(VGA_BLANK_N)
 );
 
-wire [26:0] pixel_increment;
-assign pixel_increment = 27'd39000; // Step size approx 0.0046 (x of -2 to 1, y starts at 1)
+wire signed [26:0] pixel_increment;
+assign pixel_increment = 27'sd39000; // Step size approx 0.0046 (x of -2 to 1, y starts at 1)
 
 mandelbrot_top mandelbrot_unit (
 	.reset(~KEY[0]),
@@ -967,7 +967,7 @@ module mandelbrot_top (
 	input clk,
 	input signed [26:0] x_start,
 	input signed [26:0] y_start,
-	input [26:0] pixel_increment,
+	input signed [26:0] pixel_increment,
 
 	// initial load begin	
 	output reg start,
