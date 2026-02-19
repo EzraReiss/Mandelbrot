@@ -3,3 +3,8 @@
 !*/
 !**/*.c
 !**/*.v
+!**/*.py
+!**/*sim_full_mandelbrot.tcl
+!**/*.png
+!**/*.ppm
+!**/*.md

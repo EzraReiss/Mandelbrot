@@ -1,7 +1,7 @@
 `define NUM_ITERATORS 1
-`define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
+`define X_PIXEL_MAX (640 / `NUM_ITERATORS) - 1
 `define Y_PIXEL_MAX 480 - 1
-`define MEM_MAX 480*640 / `NUM_ITERATORS - 1
+`define MEM_MAX ((480*640) / `NUM_ITERATORS) - 1
 
 
 module DE1_SoC_Computer (
@@ -942,7 +942,7 @@ module iterator (
 
 	
 	assign escape_condition = z_mag_sq > $signed(27'h2000000) 
-							|| iter_count == 1000
+							|| iter_count == `ITER_MAX - 1
 							|| zi_next > $signed(27'h1000000) 
 							|| zi_next < $signed(-27'h1000000) 
 							|| zr_next > $signed(27'h1000000) 
@@ -1134,34 +1134,34 @@ module color_scheme (
 );
 	always @(*) begin
 		if (counter >= `ITER_MAX) begin
-		color_reg = 8'b_000_000_00 ; // black
+			color_reg = 8'b_000_000_00 ; // black
 		end
 		else if (counter >= (`ITER_MAX >>> 1)) begin
-		color_reg = 8'b_011_001_00 ; // white
+			color_reg = 8'b_011_001_00 ; // white
 		end
 		else if (counter >= (`ITER_MAX >>> 2)) begin
-		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
+			color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
 		end
 		else if (counter >= (`ITER_MAX >>> 3)) begin
-		color_reg = 8'b_101_010_01 ;
+			color_reg = 8'b_101_010_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 4)) begin
-		color_reg = 8'b_011_001_01 ;
+			color_reg = 8'b_011_001_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 5)) begin
-		color_reg = 8'b_001_001_01 ;
+			color_reg = 8'b_001_001_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 6)) begin
-		color_reg = 8'b_011_010_10 ;
+			color_reg = 8'b_011_010_10 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 7)) begin
-		color_reg = 8'b_010_100_10 ;
+			color_reg = 8'b_010_100_10 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 8)) begin
-		color_reg = 8'b_010_100_10 ;
+			color_reg = 8'b_010_100_10 ;
 		end
 		else begin
-		color_reg = 8'b_010_100_10 ;
+			color_reg = 8'b_010_100_10 ;
 		end
 	end
 endmodule
