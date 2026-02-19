@@ -942,7 +942,7 @@ module iterator (
 
 	
 	assign escape_condition = z_mag_sq > $signed(27'h2000000) 
-							|| iter_count == 1000
+							|| iter_count == `ITER_MAX - 1
 							|| zi_next > $signed(27'h1000000) 
 							|| zi_next < $signed(-27'h1000000) 
 							|| zr_next > $signed(27'h1000000) 
@@ -1048,7 +1048,7 @@ module mandelbrot_top (
 		end	else begin
 			// Deassert iterator reset after first cycle out of reset
 			iterator_reset <= 1'b0;
-
+			current_state <= next_state;
 			case (current_state)
 				CALC: begin
 					if (iterator_in_rdy && !iterator_in_val) begin
