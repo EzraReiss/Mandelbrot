@@ -965,8 +965,8 @@ endmodule
 module mandelbrot_top (
 	input reset,
 	input clk,
-	input [31:0] x_start,
-	input [31:0] y_start,
+	input signed [26:0] x_start,
+	input signed [26:0] y_start,
 	input [26:0] pixel_increment,
 
 	// initial load begin	
@@ -1039,39 +1039,48 @@ module mandelbrot_top (
 			iterator_reset <= 1'b1;
 			
 			mem_write_address <= 0;
-			// mem_write_address_next <= 0;
 			mem_we <= 1'b0;
 
 			iterator_in_val <= 1'b0;
 			iterator_out_rdy <= 1'b0;
 		end	else begin
+			// Deassert iterator reset after first cycle out of reset
+			iterator_reset <= 1'b0;
+
 			case (current_state)
 				CALC: begin
-					if (iterator_in_rdy) begin
+					if (iterator_in_rdy && !iterator_in_val) begin
+						// Iterator is ready - send it the current coordinate
 						iterator_in_val <= 1'b1;
 						iterator_out_rdy <= 1'b0;
+						mem_we <= 1'b0;
+					end 
+					else if (iterator_in_val) begin
+						// in_val was asserted for one cycle, deassert it
+						iterator_in_val <= 1'b0;
+					end
+					else if (iterator_out_val) begin
+						// Iterator finished - write result and advance
+						iterator_out_rdy <= 1'b1;
+						mem_write_address <= mem_write_address + 1;
+						mem_we <= 1'b1;
+						// Advance to next pixel coordinate
 						curr_x <= next_x;
 						curr_y <= next_y;
 						pixel_x <= next_pixel_x;
 						pixel_y <= next_pixel_y;
-					end 
-					else if (iterator_out_val) begin
-						iterator_in_val <= 1'b0;
-						iterator_out_rdy <= 1'b1;
-						// mem_write_address_next <= mem_write_address + 1;	
-						mem_write_address <= mem_write_address + 1;
-						mem_we <= 1'b1;
 					end
 					else begin
 						iterator_in_val <= 1'b0;
 						iterator_out_rdy <= 1'b0;
-						mem_we <= 1'b_0;
+						mem_we <= 1'b0;
 					end
 
 				end
 				DONE: begin
 					done <= 1'b1;
 					start <= 1'b0;
+					mem_we <= 1'b0;
 				end
 			endcase
 		end
@@ -1100,18 +1109,18 @@ module mandelbrot_top (
 
 	// Next state logic
 	always @(*) begin
+		next_state = current_state; // default: hold state
 		case (current_state)
 			CALC: begin
 				if ( iterator_out_val && mem_write_address == `MEM_MAX) begin
 					next_state = DONE;
 				end
-				else begin
-					next_state = CALC;
-				end
 			end
 			DONE: begin
+				next_state = DONE;
 			end
 			default: begin
+				next_state = CALC;
 			end
 		endcase
 	end
