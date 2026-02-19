@@ -1,3 +1,7 @@
+`define NUM_ITERATORS 1;
+`define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1;
+`define Y_PIXEL_MAX 480 - 1;
+`define MEM_MAX 480*640 / `NUM_ITERATORS - 1;
 
 
 module DE1_SoC_Computer (
@@ -459,6 +463,19 @@ vga_driver DUT   (	.clock(vga_pll),
 							.blank(VGA_BLANK_N)
 );
 
+mandelbrot_top mandelbrot_unit (
+	.reset(~KEY[0]),
+	.clk(CLK_50),
+	.x_start('0),
+	.y_start('0),
+
+
+	.start(),
+	.done(), 
+	.mem_write_data(write_data),
+	.mem_write_address(write_address),
+	.mem_we(write_enable),
+);
 
 //=======================================================
 //  Structural coding
@@ -897,7 +914,7 @@ module iterator (
 				end
 			end
 			DONE: begin
-				// Stay in DONE until reset
+				// Stay in DONE until value received
 				next_state = DONE;
 				in_rdy = 1'b0;
 				out_val = 1'b1;
@@ -931,4 +948,199 @@ module iterator (
 	assign zi_next = (zr_zi <<< 1) + c_i;
 
 	assign z_mag_sq = zr_sq_next + zi_sq_next;
+endmodule
+
+
+
+
+
+module mandelbrot_top (
+	input reset,
+	input clk,
+	input reg [31:0] x_start,
+	input reg [31:0] y_start,
+	input reg [26:0] pixel_increment,
+
+	// initial load begin	
+	output reg start,
+	// initial load done 
+	output reg done, 
+
+
+	// memory write interface
+	output [7:0] mem_write_data,
+	output reg [18:0] mem_write_address,
+	output reg mem_we,
+)
+
+	// Valid states. Done is when iterator has finished all of its pixels in a frame.	
+	localparam [1:0] CALC = 2'b01,
+	                 DONE = 2'b10;
+
+	reg  [1:0] current_state;
+	reg [1:0] next_state;
+
+	reg signed [26:0] curr_x, curr_y;
+	reg [10:0] pixel_x, pixel_y;
+
+
+	wire [18:0] mem_write_address_next;
+
+	// Iterator signals
+	reg iterator_reset;
+	reg iterator_in_val;
+	reg iterator_in_rdy;
+	reg iterator_escape_condition;
+	reg iterator_out_val;
+	reg iterator_out_rdy;
+	// Iterator instance
+	iterator iter1 (
+		.reset(iterator_reset),
+		.clk(clk),
+		.in_val(iterator_in_val),
+		.in_rdy(iterator_in_rdy),
+		.in_c_r(curr_x),
+		.in_c_i(curr_y),
+		.iter_count(iterator_iter_count),
+		.escape_condition(iterator_escape_condition),
+		.out_val(iterator_out_val),
+		.out_rdy(iterator_out_rdy)
+	);
+
+
+
+	// Color scheme instance
+	reg [7:0] color_reg;
+	assign mem_write_data = color_reg;
+	color_scheme cs1 (
+		.clk(clk),
+		.counter(iterator_iter_count),
+		.color_reg(color_reg)
+	);
+
+	always @(posedge clk) begin
+		if (reset) begin
+			start <= 1'b1;
+			done <= 1'b0;
+			current_state <= CALC;
+			curr_x <= x_start;
+			curr_y <= y_start;
+			pixel_x <= iter_id;
+			pixel_y <= 0;
+			iterator_reset <= 1'b1;
+			
+			mem_write_address <= 0;
+			mem_write_address_next <= 0;
+			mem_we <= 1'b0;
+		end	else begin
+			case (current_state)
+				CALC: begin
+					if (iterator_in_rdy) begin
+						iterator_in_val <= 1'b1;
+						curr_x <= next_x;
+						curr_y <= next_y;
+						pixel_x <= next_pixel_x;
+						pixel_y <= next_pixel_y;
+					end 
+					else if (iterator_out_val) begin
+						iterator_in_val <= 1'b0;
+						iterator_out_rdy <= 1'b1;
+						mem_write_address_next <= mem_write_address + 1;	
+						mem_write_address <= mem_write_address_next;
+						mem_we <= 1'b1;
+					end
+					else begin
+						iterator_in_val <= 1'b0;
+						iterator_out_rdy <= 1'b0;
+						mem_we <= 1'b_0;
+					end
+
+				end
+				DONE: begin
+					done <= 1'b1;
+					start <= 1'b0;
+				end
+			endcase
+		end
+		
+	end
+
+
+	wire signed [9:0] next_pixel_x, next_pixel_y;
+	wire signed [26:0] next_x, next_y;
+	
+
+	always @(*) begin
+		if (pixel_x == `X_PIXEL_MAX) begin 
+			next_pixel_x = 0;
+			next_pixel_y = pixel_y + 1; 
+			next_x = x_start;
+			next_y = curr_y - pixel_increment;
+		end
+		else begin
+			next_pixel_x = pixel_x + 1; 
+			next_x = curr_x + pixel_increment;
+			next_pixel_y = pixel_y;
+			next_y = curr_y;
+		end
+	end
+
+	// Next state logic
+	always @(*) begin
+		case (current_state)
+			CALC: begin
+				if ( iterator_out_val && mem_write_address_next == `MEM_MAX) begin
+					next_state = DONE;
+				end
+				else begin
+					next_state = CALC;
+				end
+			end
+			DONE: begin
+			end
+			default: begin
+			end
+		endcase
+	end
+
+endmodule
+
+module color_scheme (
+	input clk;
+	input [$clog2(`ITER_MAX):0] counter //iterator_iter_count 
+	output reg [7:0] color_reg
+
+)
+	always @(posedge clk) begin
+		if (counter >= `ITER_MAX) begin
+		color_reg <= 8'b_000_000_00 ; // black
+		end
+		else if (counter >= (`ITER_MAX >>> 1)) begin
+		color_reg <= 8'b_011_001_00 ; // white
+		end
+		else if (counter >= (`ITER_MAX >>> 2)) begin
+		color_reg <= 8'b_011_001_00 ; //idk how this is diff than white lol
+		end
+		else if (counter >= (`ITER_MAX >>> 3)) begin
+		color_reg <= 8'b_101_010_01 ;
+		end
+		else if (counter >= (`ITER_MAX >>> 4)) begin
+		color_reg <= 8'b_011_001_01 ;
+		end
+		else if (counter >= (`ITER_MAX >>> 5)) begin
+		color_reg <= 8'b_001_001_01 ;
+		end
+		else if (counter >= (`ITER_MAX >>> 6)) begin
+		color_reg <= 8'b_011_010_10 ;
+		end
+		else if (counter >= (`ITER_MAX >>> 7)) begin
+		color_reg <= 8'b_010_100_10 ;
+		end
+		else if (counter >= (`ITER_MAX >>> 8)) begin
+		color_reg <= 8'b_010_100_10 ;
+		end
+		else begin
+		color_reg <= 8'b_010_100_10 ;
+		end
+	end
 endmodule
