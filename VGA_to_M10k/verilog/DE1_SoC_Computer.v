@@ -1,7 +1,7 @@
-`define NUM_ITERATORS 1;
-`define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1;
-`define Y_PIXEL_MAX 480 - 1;
-`define MEM_MAX 480*640 / `NUM_ITERATORS - 1;
+`define NUM_ITERATORS 1
+`define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
+`define Y_PIXEL_MAX 480 - 1
+`define MEM_MAX 480*640 / `NUM_ITERATORS - 1
 
 
 module DE1_SoC_Computer (
@@ -383,10 +383,10 @@ reg  vga_reset ;
 
 // M10k memory control and data
 wire 		[7:0] 	M10k_out ;
-reg 		[7:0] 	write_data ;
-reg 		[18:0] 	write_address ;
+wire 		[7:0] 	write_data ;
+wire 		[18:0] 	write_address ;
 reg 		[18:0] 	read_address ;
-reg 					write_enable ;
+wire 					write_enable ;
 
 // M10k memory clock
 wire 					M10k_pll ;
@@ -401,6 +401,9 @@ reg 		[9:0] 	y_coord ;
 wire 		[9:0]		next_x ;
 wire 		[9:0] 	next_y ;
 
+
+// logic for checkerboard pattern - commented out to avoid multiple drivers
+/*
 always@(posedge M10k_pll) begin
 	// Zero everything in reset
 	if (~KEY[0]) begin
@@ -437,6 +440,16 @@ always@(posedge M10k_pll) begin
 		end
 	end
 end
+*/
+
+// Reset logic for VGA (since we commented out the block above)
+always@(posedge M10k_pll) begin
+	if (~KEY[0]) begin
+		vga_reset <= 1'b_1;
+	end else begin
+		vga_reset <= 1'b_0;
+	end
+end
 
 // Instantiate memory
 M10K_1000_8 pixel_data( .q(M10k_out), // contains pixel color (8 bit) for display
@@ -463,18 +476,21 @@ vga_driver DUT   (	.clock(vga_pll),
 							.blank(VGA_BLANK_N)
 );
 
+wire [26:0] pixel_increment;
+assign pixel_increment = 27'd39000; // Step size approx 0.0046 (x of -2 to 1, y of )
+
 mandelbrot_top mandelbrot_unit (
 	.reset(~KEY[0]),
-	.clk(CLK_50),
-	.x_start('0),
-	.y_start('0),
-
+	.clk(M10k_pll),
+	.x_start(-32'sd134217728), // -2.0 in 4.23 fixed point (approximate)
+	.y_start(-32'sd67108864),  // -1.0 in 4.23 fixed point
+	.pixel_increment(pixel_increment),
 
 	.start(),
 	.done(), 
 	.mem_write_data(write_data),
 	.mem_write_address(write_address),
-	.mem_we(write_enable),
+	.mem_we(write_enable)
 );
 
 //=======================================================
@@ -993,7 +1009,7 @@ module mandelbrot_top (
 	wire iterator_escape_condition;
 	wire iterator_out_val;
 	reg iterator_out_rdy;
-	wire iterator_iter_count;
+	wire [$clog2(`ITER_MAX):0] iterator_iter_count;
 	// Iterator instance
 	iterator iter1 (
 		.reset(iterator_reset),
