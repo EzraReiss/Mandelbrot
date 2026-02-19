@@ -218,31 +218,24 @@ module iterator (
 	end	
 
 	always @(*) begin
+		// Default assignments to prevent inferred latches
+		next_state = current_state;
+		in_rdy = 1'b0;
+		out_val = 1'b0;
+
 		case (current_state)
 			IDLE: begin
+				in_rdy = 1'b1;
 				if (in_val) begin
 					next_state = CALC;
-				end
-				else begin
-					next_state = IDLE;
-					in_rdy = 1'b1;
-					out_val = 1'b0;
 				end
 			end
 			CALC: begin
 				if (escape_condition) begin
 					next_state = DONE;
 				end
-				else begin
-					next_state = CALC;
-					in_rdy = 1'b0;
-					out_val = 1'b0;
-				end
 			end
 			DONE: begin
-				// Stay in DONE until reset
-				next_state = DONE;
-				in_rdy = 1'b0;
 				out_val = 1'b1;
 				if (out_rdy) begin
 					next_state = IDLE;
@@ -251,7 +244,6 @@ module iterator (
 			default: begin
 				next_state = IDLE;
 				in_rdy = 1'b1;
-				out_val = 1'b0;
 			end
 		endcase
 	end
@@ -260,7 +252,7 @@ module iterator (
 
 	
 	assign escape_condition = z_mag_sq > $signed(27'h2000000) 
-							|| iter_count == 1000
+							|| iter_count == `ITER_MAX - 1
 							|| zi_next > $signed(27'h1000000) 
 							|| zi_next < $signed(-27'h1000000) 
 							|| zr_next > $signed(27'h1000000) 
@@ -275,3 +267,4 @@ module iterator (
 
 	assign z_mag_sq = zr_sq_next + zi_sq_next;
 endmodule
+

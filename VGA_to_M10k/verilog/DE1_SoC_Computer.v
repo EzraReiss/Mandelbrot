@@ -991,6 +991,8 @@ module mandelbrot_top (
 	reg signed [26:0] curr_x, curr_y;
 	reg [10:0] pixel_x, pixel_y;
 
+	reg signed [9:0] next_pixel_x, next_pixel_y;
+	reg signed [26:0] next_x, next_y;
 
 //	reg [$clog2(`MEM_MAX+1):0] mem_write_address_next;
 
@@ -1088,8 +1090,7 @@ module mandelbrot_top (
 	end
 
 
-	reg signed [9:0] next_pixel_x, next_pixel_y;
-	reg signed [26:0] next_x, next_y;
+
 	
 
 	always @(*) begin
