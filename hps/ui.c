@@ -51,8 +51,8 @@ void* fpga_handler(void* arg); // handles communication with FPGA via PIO ports
 
 // global variables shared between threads
 volatile int zoom_level = 1;
-volatile double pan_x = 0;
-volatile double pan_y = 0;
+volatile double pan_x = -2;
+volatile double pan_y = 1.14;
 volatile bool running = false;
 
 // Mutex to protect shared state (zoom_level, pan_x, pan_y)
@@ -137,9 +137,11 @@ void* mouse_handler(void* arg) {
             // edge detection for zoom
             if (left && !prev_left) {
                 zoom_level += zoom_level < 16 ? 1 : 0;
+                printf("Zoomed in");
             } 
             if (right && !prev_right) {
                 zoom_level -= zoom_level > 1 ? 1 : 0;
+                printf("Zoomed out");
             }
 
             prev_left = left;
@@ -154,6 +156,8 @@ void* mouse_handler(void* arg) {
                 if(pan_x < -8.0) pan_x = -8.0;
                 if(pan_y > 7.9) pan_y = 7.9;
                 if(pan_y < -8.0) pan_y = -8.0;
+
+                printf("Panned to (%.2f, %.2f)\n", pan_x, pan_y);
             }
 
             // unlock mutex after updating shared state
@@ -182,14 +186,15 @@ void* fpga_handler(void* arg) {
         *f_reset_ptr = 0x0000;
         usleep(1);
         *f_zoom_ptr = local_zoom;
-        *f_pan_x_ptr = DOUBLE_TO_FIXED_4_23_P5(local_pan_x);
-        *f_pan_y_ptr = DOUBLE_TO_FIXED_4_23_P5(local_pan_y);
+        *f_pan_x_ptr = DOUBLE_TO_FIXED_4_23_P5(-1); //DOUBLE_TO_FIXED_4_23_P5(local_pan_x);
+        *f_pan_y_ptr = DOUBLE_TO_FIXED_4_23_P5(1.14); //DOUBLE_TO_FIXED_4_23_P5(local_pan_y);
 
 
         // time the frame load
         if (!running && *f_start_ptr) {
             gettimeofday(&start_time, NULL);
             running = true;
+            printf("Started frame load\n");
         }
 
         if (running && *f_finish_ptr) {
