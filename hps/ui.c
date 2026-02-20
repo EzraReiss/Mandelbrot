@@ -177,7 +177,10 @@ void* fpga_handler(void* arg) {
         local_pan_y = pan_y;
         // release mutex 
         pthread_mutex_unlock(&state_mutex);
-        
+        *f_reset_ptr = 0xFFFF;
+        usleep(1);
+        *f_reset_ptr = 0x0000;
+        usleep(1);
         *f_zoom_ptr = local_zoom;
         *f_pan_x_ptr = DOUBLE_TO_FIXED_4_23_P5(local_pan_x);
         *f_pan_y_ptr = DOUBLE_TO_FIXED_4_23_P5(local_pan_y);
