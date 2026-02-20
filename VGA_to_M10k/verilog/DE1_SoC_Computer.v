@@ -1,7 +1,7 @@
 `define NUM_ITERATORS 4
-`define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
-`define Y_PIXEL_MAX 480 - 1
-`define MEM_MAX 480*640 / `NUM_ITERATORS - 1
+`define X_PIXEL_MAX (640 / `NUM_ITERATORS - 1)
+`define Y_PIXEL_MAX (480 - 1)
+`define MEM_MAX (480*640 / `NUM_ITERATORS - 1)
 // Base step in 4.23 fixed point: 39000 / 2^23 ≈ 0.00464 per pixel at zoom=0
 `define BASE_STEP 27'sd39000
 
