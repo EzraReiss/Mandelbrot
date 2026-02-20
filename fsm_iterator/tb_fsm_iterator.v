@@ -42,6 +42,9 @@ module tb_fsm_iterator;
     // ---------------------------------------------------------
     // Helper Task: Send a coordinate and wait for result
     // ---------------------------------------------------------
+    // ---------------------------------------------------------
+    // Helper Task: Send a coordinate and wait for result
+    // ---------------------------------------------------------
     task test_point;
         input signed [26:0] c_r;
         input signed [26:0] c_i;
@@ -49,14 +52,14 @@ module tb_fsm_iterator;
             // 1. Wait until DUT is ready for new data
             while (!in_rdy) @(posedge clk);
             
-            // 2. Drive inputs
-            in_c_r = c_r;
-            in_c_i = c_i;
-            in_val = 1'b1;
+            // 2. Drive inputs using NON-BLOCKING assignments
+            in_c_r <= c_r;
+            in_c_i <= c_i;
+            in_val <= 1'b1;
             
             // 3. Wait one clock cycle for the handshake to register
             @(posedge clk);
-            in_val = 1'b0; // De-assert in_val so we don't trigger twice
+            in_val <= 1'b0; // De-assert using NON-BLOCKING assignment
 
             // 4. Wait for DUT to finish calculation
             while (!out_val) @(posedge clk);
@@ -68,10 +71,10 @@ module tb_fsm_iterator;
                      iter_count, 
                      escape_condition);
             
-            // 6. Acknowledge the output so the FSM returns to IDLE
-            out_rdy = 1'b1;
+            // 6. Acknowledge the output using NON-BLOCKING assignments
+            out_rdy <= 1'b1;
             @(posedge clk);
-            out_rdy = 1'b0;
+            out_rdy <= 1'b0;
             
             // Add a small gap between tests in the waveform
             repeat(5) @(posedge clk);
@@ -116,6 +119,9 @@ module tb_fsm_iterator;
         // +0.5 is 27'h0400000. Two's complement for -0.5 is 27'h7C00000
         test_point(27'h7C00000, 27'h0400000);
 
+
+
+        test_point(27'h7F33333, 27'h0533333);
         $display("--- Tests Complete ---");
         $finish;
     end
