@@ -1052,6 +1052,10 @@ module mandelbrot_top (
 						iterator_in_val <= 1'b1;
 						iterator_out_rdy <= 1'b0;
 						mem_we <= 1'b0;
+						// Increment address AFTER writing (previous cycle wrote
+						// with the old address, now advance for next pixel)
+						if (mem_write_address != 0 || pixel_x != 0 || pixel_y != 0)
+							mem_write_address <= mem_write_address + 1;
 					end 
 					else if (iterator_in_val) begin
 						// in_val was asserted for one cycle, deassert it
@@ -1059,9 +1063,8 @@ module mandelbrot_top (
 						mem_we <= 1'b0;
 					end
 					else if (iterator_out_val) begin
-						// Iterator finished - write result and advance
+						// Iterator finished - write result using CURRENT address
 						iterator_out_rdy <= 1'b1;
-						mem_write_address <= mem_write_address + 1;
 						mem_we <= 1'b1;
 						// Advance to next pixel coordinate
 						curr_x <= next_x;
