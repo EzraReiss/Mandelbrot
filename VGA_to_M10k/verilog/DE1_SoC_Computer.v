@@ -910,12 +910,16 @@ module iterator (
 	localparam [1:0] IDLE = 2'b00,
 	                 CALC = 2'b01,
 	                 DONE = 2'b10;
+
 	reg  [1:0] current_state;
-	reg [1:0] next_state;
+//	reg  [1:0] current_mult_state;
+	
+//	reg  [1:0] next_mult_state;
+	reg  [1:0] next_state;
 
 	reg signed [26:0] zi, zr, zr_sq, zi_sq, c_r, c_i;
 	//wire escape_condition;
-	wire signed [26:0] zr_next, zi_next, z_mag_sq, zr_sq_next, zi_sq_next, zr_zi;
+	wire signed [26:0] zr_next, zi_next, z_mag_sq, zr_sq_next, zi_sq_next, zr_zi, zi_shifted;
 
 	always @(posedge clk) begin
 		case (current_state)
@@ -981,27 +985,174 @@ module iterator (
 	end
 
 
-
 	
-	assign escape_condition = z_mag_sq > $signed(27'h2000000) 
-							|| iter_count == `ITER_MAX - 1
-							|| zi_next > $signed(27'h1000000) 
-							|| zi_next < $signed(-27'h1000000) 
-							|| zr_next > $signed(27'h1000000) 
-							|| zr_next < $signed(-27'h1000000); 
-
+	assign escape_condition = 
+		 // 1. Magnitude Check ( > 4.0 )
+		 z_mag_sq > $signed(27'h2000000) 
+		 
+		 // 2. MAGNITUDE OVERFLOW CATCHER (If sum of squares wrapped to negative)
+		 || z_mag_sq < $signed(27'h0000000) 
+		 
+		 // 3. Max Iterations
+		 || iter_count == `ITER_MAX - 1
+		 
+		 // 4. Bounding Box +/- 2.0
+//		 || zi_next >  $signed(27'h1000000) 
+//		 || zi_next <  $signed(27'h7000000) 
+//		 || zr_next >  $signed(27'h1000000) 
+//		 || zr_next <  $signed(27'h7000000)
+		 
+		 || zr_next >  $signed(27'h1400000) // +2.5
+		 || zr_next <  $signed(27'h6C00000) // -2.5
+		 || zi_next >  $signed(27'h1400000) // +2.5
+		 || zi_next <  $signed(27'h6C00000) // -2.5
+		 
+		 // 5. Cross-Product Bounds +/- 3.5
+		 || zr_zi >  $signed(27'h1C00000) 
+		 || zr_zi <  $signed(27'h6400000);
+		 
 	signed_mult mult_zr_zr(zr_sq_next, zr, zr);
 	signed_mult mult_zi_zi(zi_sq_next, zi, zi);
 	signed_mult mult_zr_zi(zr_zi, zr, zi);
 
 	assign zr_next = zr_sq_next - zi_sq_next + c_r;
-	assign zi_next = (zr_zi <<< 1) + c_i;
+	assign zi_shifted = (zr_zi <<< 1);
+	assign zi_next = zi_shifted + c_i;
 
 	assign z_mag_sq = zr_sq_next + zi_sq_next;
 endmodule
 
 
+//
+// FSM iterator uses only 1 DSP
+//
+module fsm_iterator (
 
+	input reset,
+	input clk,
+	input in_val,
+	output reg in_rdy,
+
+	input signed  [26:0] in_c_r,
+	input signed  [26:0] in_c_i,
+
+	output reg signed [$clog2(`ITER_MAX):0] iter_count,
+	output escape_condition,
+	output reg out_val,
+	input out_rdy
+);
+	localparam [1:0] CALC = 2'b00,
+				DONE = 2'b01;
+	
+	localparam [1:0] CALC_1 = 2'b00,
+					 CALC_2 = 2'b01,
+					 CALC_3 = 2'b10;
+
+	reg [1:0] current_state;
+	reg [1:0] next_state;
+
+	reg [1:0] calc_state;
+	reg [1:0] next_calc_state;
+
+	always @ (posedge clk) begin
+		if (reset) begin
+			current_state <= CALC;
+			calc_state <= CALC_1;
+		end
+		else begin
+			current_state <= next_state;
+			calc_state <= next_calc_state;		
+		end
+
+	end
+
+	always @ (*) begin
+		case (current_state)
+			CALC: begin
+				case (calc_state) 
+					CALC_1: begin
+						next_calc_state = CALC_2;
+					end
+
+					CALC_2: begin
+						next_calc_state = CALC_3;
+					end
+
+					CALC_3: begin
+						// If escape condition met, set next_state to DONE
+						if (escape_condition) begin
+							next_state = DONE;
+						end
+						else begin
+							next_calc_state = CALC_1;
+						end
+					end
+				endcase
+			end
+			DONE: begin
+				if (out_rdy) begin
+					next_state = CALC;
+					next_calc_state = CALC_1;
+				end
+				else begin
+					next_state = DONE;
+					next_calc_state = CALC_1;
+				end
+			end
+		endcase
+	end
+
+	reg signed [26:0] zi, zr, zr_sq, zi_sq, zr_next, zi_next, z_mag_sq, zr_sq_next, zi_sq_next, zr_zi, zr_zi2, c_r, c_i, a, b, y;	
+	signed_mult mult_a_b_y(a, b, y);
+
+	always @ (*) begin
+		a = 0;
+		b = 0;
+		zr_zi = zr_zi_reg;       
+		zr_sq_next = zr_sq_reg;  
+		zi_sq_next = zi_sq_reg;  
+		
+		zr_next = zr;            
+		zi_next = zi;            
+		z_mag_sq = 0;            
+
+		case (calc_state)
+			CALC_1: begin
+				// Compute zr * zi
+				a = zr;
+				b = zi;
+				zr_zi = y;
+				
+				zi_next = (zr_zi <<< 1) + c_i;
+			end
+
+			CALC_2: begin
+				// Compute zr^2 (zr * zr)
+				a = zr;
+				b = zr;    // Both inputs must be zr
+				zr_sq_next = y; // Capture zr squared
+			end
+
+			CALC_3: begin
+				// Compute zi^2 (zi * zi)
+				a = zi;
+				b = zi;    // Both inputs must be zi
+				zi_sq_next = y; // Capture zi squared
+
+				// Now that we have both squares, we can finish the math
+				zr_next = zr_sq_next - zi_sq_next + c_r;
+				z_mag_sq = zr_sq_next + zi_sq_next;
+			end 
+			
+			default: begin
+				// Default state behavior
+				a = 0;
+				b = 0;
+			end
+		endcase
+	end
+
+endmodule
 
 
 module mandelbrot_top #(
