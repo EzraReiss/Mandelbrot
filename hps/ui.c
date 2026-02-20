@@ -50,7 +50,7 @@ void* mouse_handler(void* arg); // handles mouse input for zoom and pan
 void* fpga_handler(void* arg); // handles communication with FPGA via PIO ports
 
 // global variables shared between threads
-volatile int zoom_level = 1;
+volatile int zoom_level = 0;
 volatile double pan_x = -2;
 volatile double pan_y = 1.14;
 volatile bool running = false;
@@ -59,7 +59,7 @@ volatile bool running = false;
 pthread_mutex_t state_mutex;
 
 // convert float to 4.23 fixed point, with 5 padded 0's for the LSB so its 32 bit
-#define DOUBLE_TO_FIXED_4_23_P5(d) ( (int32_t)((d) * 268435456.0) & (int32_t)0xFFFFFFE0 )
+#define DOUBLE_TO_FIXED_4_23_P5(d) ( (int32_t) ( (d) * 8388608.0 ) )
 
 
 // main
@@ -87,6 +87,7 @@ int main(void)
     f_start_ptr = (signed int *)(h2p_virtual_base + FPGA_PIO_START);
     f_finish_ptr = (signed int *)(h2p_virtual_base + FPGA_PIO_FINISH);
 
+    
     // initialize mutex
     pthread_mutex_init(&state_mutex, NULL);
 
@@ -100,7 +101,6 @@ int main(void)
     pthread_join(fpga_thread, NULL); 
     // clean up mutex
     pthread_mutex_destroy(&state_mutex);
-    
     return 0;
 }
 
@@ -135,11 +135,11 @@ void* mouse_handler(void* arg) {
             pthread_mutex_lock(&state_mutex);
 
             // edge detection for zoom
-            if (left && !prev_left) {
+            if (left) {
                 zoom_level += zoom_level < 16 ? 1 : 0;
                 printf("Zoomed in");
             } 
-            if (right && !prev_right) {
+            if (right) {
                 zoom_level -= zoom_level > 1 ? 1 : 0;
                 printf("Zoomed out");
             }
@@ -179,15 +179,18 @@ void* fpga_handler(void* arg) {
         local_zoom = zoom_level;
         local_pan_x = pan_x;
         local_pan_y = pan_y;
+
         // release mutex 
         pthread_mutex_unlock(&state_mutex);
         *f_reset_ptr = 0xFFFF;
+        
+        *f_zoom_ptr = local_zoom;
+        *f_pan_x_ptr = DOUBLE_TO_FIXED_4_23_P5(local_pan_x); //DOUBLE_TO_FIXED_4_23_P5(local_pan_x);
+        *f_pan_y_ptr = DOUBLE_TO_FIXED_4_23_P5(local_pan_y); //DOUBLE_TO_FIXED_4_23_P5(local_pan_y);
+
         usleep(1);
         *f_reset_ptr = 0x0000;
         usleep(1);
-        *f_zoom_ptr = local_zoom;
-        *f_pan_x_ptr = DOUBLE_TO_FIXED_4_23_P5(-1); //DOUBLE_TO_FIXED_4_23_P5(local_pan_x);
-        *f_pan_y_ptr = DOUBLE_TO_FIXED_4_23_P5(1.14); //DOUBLE_TO_FIXED_4_23_P5(local_pan_y);
 
 
         // time the frame load
@@ -207,8 +210,7 @@ void* fpga_handler(void* arg) {
         }
 
         // unlock mutex after reading shared state
-        pthread_mutex_unlock(&state_mutex);
-        usleep(100); 
+        usleep(1000000); 
     }
     return NULL;
 }
