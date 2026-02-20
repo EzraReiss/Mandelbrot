@@ -1,10 +1,9 @@
 `define NUM_ITERATORS 1
 `define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
-`define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
 `define Y_PIXEL_MAX 480 - 1
 `define MEM_MAX 480*640 / `NUM_ITERATORS - 1
-`define STEP_SIZE_X 0.0046 * `NUM_ITERATORS //verify the output type of this
-`define STEP_SIZE_Y 0.0046
+// Base step in 4.23 fixed point: 39000 / 2^23 ≈ 0.00464 per pixel at zoom=0
+`define BASE_STEP 27'sd39000
 
 
 module DE1_SoC_Computer (
@@ -409,11 +408,13 @@ wire [31:0] pio_zoom;
 wire signed [31:0] pio_pan_x;
 wire signed [31:0] pio_pan_y;
 
+// pio_start, pio_reset, pio_zoom, pio_pan_x/y: ARM→FPGA (ARM writes, FPGA reads)
+// pio_done:                                      FPGA→ARM (FPGA writes, ARM reads)
 wire [31:0] pio_start;
 wire [31:0] pio_done;
-
-assign pio_start [31:1] = 31'b0;
-assign pio_done [31:1] = 31'b0;
+// Bit 0 = mandelbrot_top done. Upper bits reserved for future iterators.
+// Must be explicitly driven since only bit 0 is connected to a module output.
+assign pio_done[31:1] = 31'b0;
 
 
 // Reset logic for VGA (since we commented out the block above)
@@ -452,13 +453,17 @@ vga_driver DUT   (	.clock(vga_pll),
 							.blank(VGA_BLANK_N)
 );
 
-localparam signed [26:0] step_size_x_int = 
-
+// Step size arithmetic (4.23 fixed-point):
+//   Y step = BASE_STEP >> zoom          (each zoom level = 2× magnification)
+//   X step = BASE_STEP * N_ITER >> zoom  (N iterators each handle every Nth column)
+// pio_zoom[4:0] allows zoom levels 0-31 (zoom=0 is widest view, =15 is ~32000× in)
 wire signed [26:0] pixel_increment_x;
 wire signed [26:0] pixel_increment_y;
 
-assign pixel_increment_x = `STEP_SIZE_X >> pio_zoom;
-assign pixel_increment_y = `STEP_SIZE_Y >> pio_zoom;
+// Arithmetic right-shift (>>>) by zoom divides step by 2^zoom.
+// $signed() cast ensures the shift is arithmetic even in a mixed expression.
+assign pixel_increment_y = $signed(`BASE_STEP)                    >>> pio_zoom[4:0];
+assign pixel_increment_x = $signed(`BASE_STEP * `NUM_ITERATORS)   >>> pio_zoom[4:0];
 
 mandelbrot_top mandelbrot_unit (
 	.reset(~KEY[0] || pio_reset[0]),
@@ -1052,7 +1057,6 @@ module mandelbrot_top (
 						// in_val was asserted for one cycle, deassert it
 						iterator_in_val <= 1'b0;
 						mem_we <= 1'b0;
-						mem_we <= 1'b0;
 					end
 					else if (iterator_out_val) begin
 						// Iterator finished - write result and advance
@@ -1067,7 +1071,6 @@ module mandelbrot_top (
 					end
 					else begin
 						iterator_in_val <= 1'b0;
-						iterator_out_rdy <= 1'b1;
 						iterator_out_rdy <= 1'b1;
 						mem_we <= 1'b0;
 					end
