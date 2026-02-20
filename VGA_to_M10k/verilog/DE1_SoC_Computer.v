@@ -1,5 +1,6 @@
 `define NUM_ITERATORS 1
 `define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
+`define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
 `define Y_PIXEL_MAX 480 - 1
 `define MEM_MAX 480*640 / `NUM_ITERATORS - 1
 `define STEP_SIZE_X 0.0046 * NUM_ITERATORS //verify the output type of this
@@ -981,6 +982,8 @@ module mandelbrot_top (
 
 	reg [9:0] next_pixel_x, next_pixel_y;
 	reg signed [26:0] next_x, next_y;
+	reg [9:0] next_pixel_x, next_pixel_y;
+	reg signed [26:0] next_x, next_y;
 
 //	reg [$clog2(`MEM_MAX+1):0] mem_write_address_next;
 
@@ -1049,6 +1052,7 @@ module mandelbrot_top (
 						// in_val was asserted for one cycle, deassert it
 						iterator_in_val <= 1'b0;
 						mem_we <= 1'b0;
+						mem_we <= 1'b0;
 					end
 					else if (iterator_out_val) begin
 						// Iterator finished - write result and advance
@@ -1063,6 +1067,7 @@ module mandelbrot_top (
 					end
 					else begin
 						iterator_in_val <= 1'b0;
+						iterator_out_rdy <= 1'b1;
 						iterator_out_rdy <= 1'b1;
 						mem_we <= 1'b0;
 					end
@@ -1124,32 +1129,42 @@ module color_scheme (
 	always @(*) begin
 		if (counter >= `ITER_MAX) begin
 		color_reg = 8'b_000_000_00 ; // black
+		color_reg = 8'b_000_000_00 ; // black
 		end
 		else if (counter >= (`ITER_MAX >>> 1)) begin
+		color_reg = 8'b_011_001_00 ; // white
 		color_reg = 8'b_011_001_00 ; // white
 		end
 		else if (counter >= (`ITER_MAX >>> 2)) begin
 		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
+		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
 		end
 		else if (counter >= (`ITER_MAX >>> 3)) begin
+		color_reg = 8'b_101_010_01 ;
 		color_reg = 8'b_101_010_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 4)) begin
 		color_reg = 8'b_011_001_01 ;
+		color_reg = 8'b_011_001_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 5)) begin
+		color_reg = 8'b_001_001_01 ;
 		color_reg = 8'b_001_001_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 6)) begin
 		color_reg = 8'b_011_010_10 ;
+		color_reg = 8'b_011_010_10 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 7)) begin
+		color_reg = 8'b_010_100_10 ;
 		color_reg = 8'b_010_100_10 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 8)) begin
 		color_reg = 8'b_010_100_10 ;
+		color_reg = 8'b_010_100_10 ;
 		end
 		else begin
+		color_reg = 8'b_010_100_10 ;
 		color_reg = 8'b_010_100_10 ;
 		end
 	end
