@@ -2,7 +2,7 @@
 // ui.c
 // controls zoom and pan of mandelbrot
 //
-// compile with gcc ui.c -o gr -O2 -lm
+// compile with gcc ui.c -o ui -O2 -lm -pthread
 //
 // Demetrios Gavalas
 
@@ -53,6 +53,7 @@ int fd;
 // threads
 void *mouse_handler(void *arg); // handles mouse input for zoom and pan
 void *fpga_handler(void *arg);  // handles communication with FPGA via PIO ports
+void *console_reset(void *arg); // handles console input for resetting view
 
 // State is tracked as the CENTER of the view in complex-plane coordinates.
 // The corner (x_start, y_start) is computed from center + half-extent.
@@ -102,13 +103,15 @@ int main(void) {
   pthread_mutex_init(&state_mutex, NULL);
 
   // create threads for mouse handling and FPGA communication
-  pthread_t mouse_thread, fpga_thread;
+  pthread_t mouse_thread, fpga_thread, console_thread;
   pthread_create(&mouse_thread, NULL, mouse_handler, NULL);
   pthread_create(&fpga_thread, NULL, fpga_handler, NULL);
+  pthread_create(&console_thread, NULL, console_reset, NULL);
 
   // wait for threads to finish
   pthread_join(mouse_thread, NULL);
   pthread_join(fpga_thread, NULL);
+  pthread_join(console_thread, NULL);
   // clean up mutex
   pthread_mutex_destroy(&state_mutex);
   return 0;
@@ -116,7 +119,7 @@ int main(void) {
 
 // pthread function to handle mouse input for zoom and pan
 void *mouse_handler(void *arg) {
-  int fd, bytes;
+  int fd, bytes, fd_kb, bytes_kb;
   unsigned char data[3];
   const char *pDevice = "/dev/input/mice";
 
@@ -254,4 +257,19 @@ void *fpga_handler(void *arg) {
     usleep(10000); // 10ms poll — no need to spin harder than this
   }
   return NULL;
+}
+
+void* console_reset(void* arg) {
+  while(1){
+    // read r from console to reset 
+    char input[20];
+    fgets(input, 20, stdin);
+    if (input[0] == 'r') {
+      center_x = -0.5;
+      center_y = 0;
+      zoom_level = 0;
+      state_dirty = true;
+      printf("Reset view to default\n");
+    }
+  }
 }
