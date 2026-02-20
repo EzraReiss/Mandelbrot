@@ -172,7 +172,7 @@ void *mouse_handler(void *arg) {
         // plane.
         double pan_scale = step * 2.0;
 
-        center_x += (double)x * pan_scale;
+        center_x -= (double)x * pan_scale;
         center_y -=
             (double)y * pan_scale; // mouse y is inverted vs complex plane
 
@@ -236,17 +236,13 @@ void *fpga_handler(void *arg) {
       usleep(1);
       *f_reset_ptr = 0x0000;
 
-      running = false; // new frame starting
+      running = true; // new frame starting
+      gettimeofday(&start_time, NULL);
     }
 
     // time the frame load
-    if (!running && *f_start_ptr) {
-      gettimeofday(&start_time, NULL);
-      running = true;
-      printf("Started frame load\n");
-    }
 
-    if (running && *f_finish_ptr) {
+    if (*f_finish_ptr && running) {
       gettimeofday(&end_time, NULL);
       long seconds = end_time.tv_sec - start_time.tv_sec;
       long microseconds = end_time.tv_usec - start_time.tv_usec;
