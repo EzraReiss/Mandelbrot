@@ -3,7 +3,7 @@
 `define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
 `define Y_PIXEL_MAX 480 - 1
 `define MEM_MAX 480*640 / `NUM_ITERATORS - 1
-`define STEP_SIZE_X 0.0046 * NUM_ITERATORS //verify the output type of this
+`define STEP_SIZE_X 0.0046 * `NUM_ITERATORS //verify the output type of this
 `define STEP_SIZE_Y 0.0046
 
 
@@ -451,6 +451,8 @@ vga_driver DUT   (	.clock(vga_pll),
 							.clk(VGA_CLK),
 							.blank(VGA_BLANK_N)
 );
+
+localparam signed [26:0] step_size_x_int = 
 
 wire signed [26:0] pixel_increment_x;
 wire signed [26:0] pixel_increment_y;
@@ -980,8 +982,6 @@ module mandelbrot_top (
 	reg signed [26:0] curr_x, curr_y;
 	reg [9:0] pixel_x, pixel_y;
 
-	reg [9:0] next_pixel_x, next_pixel_y;
-	reg signed [26:0] next_x, next_y;
 	reg [9:0] next_pixel_x, next_pixel_y;
 	reg signed [26:0] next_x, next_y;
 
