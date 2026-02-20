@@ -1,9 +1,11 @@
-`define NUM_ITERATORS 1
+`define NUM_ITERATORS 4
 `define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
 `define Y_PIXEL_MAX 480 - 1
 `define MEM_MAX 480*640 / `NUM_ITERATORS - 1
 // Base step in 4.23 fixed point: 39000 / 2^23 ≈ 0.00464 per pixel at zoom=0
 `define BASE_STEP 27'sd39000
+
+`define MEM_SIZE MEM_MAX
 
 
 module DE1_SoC_Computer (
@@ -383,25 +385,46 @@ wire vga_pll_lock ;
 wire vga_pll ;
 reg  vga_reset ;
 
-// M10k memory control and data
-wire 		[7:0] 	M10k_out ;
-wire 		[7:0] 	write_data ;
-wire 		[18:0] 	write_address ;
-reg 		[18:0] 	read_address ;
-wire 					write_enable ;
-
 // M10k memory clock
 wire 					M10k_pll ;
 wire 					M10k_pll_locked ;
 
-// Memory writing control registers
-reg 		[7:0] 	arbiter_state ;
-reg 		[9:0] 	x_coord ;
-reg 		[9:0] 	y_coord ;
-
 // Wires for connecting VGA driver to memory
-wire 		[9:0]		next_x ;
+wire 		[9:0]	next_x ;
 wire 		[9:0] 	next_y ;
+//AI to make multicore setup faster
+// Per-iterator write signals (each iterator has its own M10K bank)
+wire [7:0]  iter_write_data  [`NUM_ITERATORS-1:0];
+wire [18:0] iter_write_addr  [`NUM_ITERATORS-1:0];
+wire        iter_we          [`NUM_ITERATORS-1:0];
+wire        iter_done        [`NUM_ITERATORS-1:0];
+
+// Per-bank M10K read outputs
+wire [7:0]  bank_q           [`NUM_ITERATORS-1:0];
+
+// VGA read mux: select which bank to read based on next_x % NUM_ITERATORS
+// For NUM_ITERATORS = power of 2, this is just the low bits of next_x
+reg  [7:0]  M10k_out;
+always @(*) begin
+	M10k_out = bank_q[next_x % `NUM_ITERATORS];
+end
+
+// Per-bank read address: (640*y + x) / N  — DSP-free using shift-adds
+// 640*y = (y << 9) + (y << 7)  since 640 = 512 + 128
+// Division by N (power of 2) is a right shift — free in hardware
+wire [18:0] flat_read_addr;
+assign flat_read_addr = ({9'd0, next_y} << 9) + ({9'd0, next_y} << 7) + {9'd0, next_x};
+wire [18:0] bank_read_addr;
+assign bank_read_addr = flat_read_addr >> $clog2(`NUM_ITERATORS);
+
+// Done when ALL iterators are finished
+reg all_done;
+integer di;
+always @(*) begin
+	all_done = 1'b1;
+	for (di = 0; di < `NUM_ITERATORS; di = di + 1)
+		all_done = all_done & iter_done[di];
+end
 
 wire [31:0] pio_reset;
 wire [31:0] pio_zoom;
@@ -412,9 +435,8 @@ wire signed [31:0] pio_pan_y;
 // pio_done:                                      FPGA→ARM (FPGA writes, ARM reads)
 wire [31:0] pio_start;
 wire [31:0] pio_done;
-// Bit 0 = mandelbrot_top done. Upper bits reserved for future iterators.
-// Must be explicitly driven since only bit 0 is connected to a module output.
 assign pio_done[31:1] = 31'b0;
+assign pio_done[0]    = all_done;
 
 
 // Reset logic for VGA (since we commented out the block above)
@@ -428,19 +450,12 @@ end
 
 
 
-// Instantiate memory
-M10K_1000_8 pixel_data( .q(M10k_out), // contains pixel color (8 bit) for display
-								.d(write_data),
-								.write_address(write_address),
-								.read_address((19'd_640*next_y) + next_x),
-								.we(write_enable),
-								.clk(M10k_pll)
-);
+
 
 // Instantiate VGA driver					
 vga_driver DUT   (	.clock(vga_pll), 
 							.reset(vga_reset),
-							.color_in(M10k_out),	// Pixel color (8-bit) from memory
+							.color_in(M10k_out),	// Pixel color (8-bit) from selected memory bank
 							.next_x(next_x),		// This (and next_y) used to specify memory read address
 							.next_y(next_y),		// This (and next_x) used to specify memory read address
 							.hsync(VGA_HS),
@@ -465,20 +480,47 @@ wire signed [26:0] pixel_increment_y;
 assign pixel_increment_y = $signed(`BASE_STEP)                    >>> pio_zoom[4:0];
 assign pixel_increment_x = $signed(`BASE_STEP * `NUM_ITERATORS)   >>> pio_zoom[4:0];
 
-mandelbrot_top mandelbrot_unit (
-	.reset(~KEY[0] || pio_reset[0]),
-	.clk(M10k_pll),
-	.x_start(pio_pan_x[26:0]), // -2.0 in 4.23 fixed point
-	.y_start(pio_pan_y[26:0]),   // 479*39000/2: rows 0 & 479 exactly mirror, rows 239/240 straddle y=0
-	.pixel_increment_x(pixel_increment_x),
-	.pixel_increment_y(pixel_increment_y),
+reg signed [26:0] iterator_offset [`NUM_ITERATORS-1:0] = {`NUM_ITERATORS{1'b0}};
 
-	.start(pio_start[0]),
-	.done(pio_done[0]), 
-	.mem_write_data(write_data),
-	.mem_write_address(write_address),
-	.mem_we(write_enable)
-);
+always @(*) begin
+	for (int i = 1; i < `NUM_ITERATORS; i++) begin
+		iterator_offset[i] = iterator_offset[i-1] + pixel_increment_y; //needs to be y instead of x since y is like single pixel difference
+	end
+end
+
+genvar gi;
+generate 
+	for (gi = 0; gi < `NUM_ITERATORS; gi = gi + 1) begin : gen_iter
+		// Each iterator computes every Nth column
+		mandelbrot_top #(
+			.ITERATOR_ID(gi),
+			.NUM_ITERATORS(`NUM_ITERATORS)
+		) mandelbrot_unit (
+			.reset(~KEY[0] || pio_reset[0]),
+			.clk(M10k_pll),
+			.x_start(pio_pan_x[26:0] + iterator_offset[gi]),
+			.y_start(pio_pan_y[26:0]),
+			.pixel_increment_x(pixel_increment_x),
+			.pixel_increment_y(pixel_increment_y),
+
+			.start(),
+			.done(iter_done[gi]), 
+			.mem_write_data(iter_write_data[gi]),
+			.mem_write_address(iter_write_addr[gi]),
+			.mem_we(iter_we[gi])
+		);
+
+		// Each iterator has its own M10K bank
+		M10K_1000_8 pixel_data( 
+			.q(bank_q[gi]),
+			.d(iter_write_data[gi]),
+			.write_address(iter_write_addr[gi]),
+			.read_address(bank_read_addr),
+			.we(iter_we[gi]),
+			.clk(M10k_pll)
+		);
+	end
+endgenerate
 
 //=======================================================
 //  Structural coding
@@ -957,7 +999,10 @@ endmodule
 
 
 
-module mandelbrot_top (
+module mandelbrot_top #(
+	parameter ITERATOR_ID   = 0,
+	parameter NUM_ITERATORS = 1
+) (
 	input reset,
 	input clk,
 	input signed [26:0] x_start,
@@ -1112,7 +1157,8 @@ module mandelbrot_top (
 		next_state = current_state; // default: hold state
 		case (current_state)
 			CALC: begin
-				if ( iterator_out_val && mem_write_address == `MEM_MAX) begin
+				// Done when the last pixel in the frame has been computed
+				if (iterator_out_val && pixel_x == `X_PIXEL_MAX && pixel_y == `Y_PIXEL_MAX) begin
 					next_state = DONE;
 				end
 			end
