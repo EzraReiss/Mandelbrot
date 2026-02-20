@@ -415,7 +415,8 @@ end
 wire [18:0] flat_read_addr;
 assign flat_read_addr = ({9'd0, next_y} << 9) + ({9'd0, next_y} << 7) + {9'd0, next_x};
 wire [18:0] bank_read_addr;
-assign bank_read_addr = flat_read_addr >> $clog2(`NUM_ITERATORS);
+// Guard: when NUM_ITERATORS=1, $clog2(1)=0, shift by 0 is a no-op (correct)
+assign bank_read_addr = (`NUM_ITERATORS == 1) ? flat_read_addr : (flat_read_addr >> $clog2(`NUM_ITERATORS));
 
 // Done when ALL iterators are finished
 reg all_done;
@@ -480,11 +481,13 @@ wire signed [26:0] pixel_increment_y;
 assign pixel_increment_y = $signed(`BASE_STEP)                    >>> pio_zoom[4:0];
 assign pixel_increment_x = $signed(`BASE_STEP * `NUM_ITERATORS)   >>> pio_zoom[4:0];
 
-reg signed [26:0] iterator_offset [`NUM_ITERATORS-1:0] = {`NUM_ITERATORS{1'b0}};
+reg signed [26:0] iterator_offset [`NUM_ITERATORS-1:0];
 
+integer oi;
 always @(*) begin
-	for (int i = 1; i < `NUM_ITERATORS; i++) begin
-		iterator_offset[i] = iterator_offset[i-1] + pixel_increment_y; //needs to be y instead of x since y is like single pixel difference
+	iterator_offset[0] = 27'sd0;
+	for (oi = 1; oi < `NUM_ITERATORS; oi = oi + 1) begin
+		iterator_offset[oi] = iterator_offset[oi-1] + pixel_increment_y;
 	end
 end
 
@@ -503,15 +506,16 @@ generate
 			.pixel_increment_x(pixel_increment_x),
 			.pixel_increment_y(pixel_increment_y),
 
-			.start(),
 			.done(iter_done[gi]), 
 			.mem_write_data(iter_write_data[gi]),
 			.mem_write_address(iter_write_addr[gi]),
 			.mem_we(iter_we[gi])
 		);
 
-		// Each iterator has its own M10K bank
-		M10K_1000_8 pixel_data( 
+		// Each iterator has its own M10K bank (sized for 640/N columns × 480 rows)
+		M10K_1000_8 #(
+			.MEM_DEPTH(480 * 640 / `NUM_ITERATORS)
+		) pixel_data( 
 			.q(bank_q[gi]),
 			.d(iter_write_data[gi]),
 			.write_address(iter_write_addr[gi]),
@@ -851,15 +855,16 @@ endmodule
 // http://people.ece.cornell.edu/land/courses/ece5760/DE1_SOC/HDL_style_qts_qii51007.pdf
 //============================================================
 
-module M10K_1000_8( 
+module M10K_1000_8 #(
+    parameter MEM_DEPTH = 307200
+)( 
     output reg [7:0] q,
     input [7:0] d,
     input [18:0] write_address, read_address,
     input we, clk
 );
 	 // force M10K ram style
-	 // 307200 words of 8 bits
-    reg [7:0] mem [307200:0]  /* synthesis ramstyle = "no_rw_check, M10K" */;
+    reg [7:0] mem [MEM_DEPTH-1:0]  /* synthesis ramstyle = "no_rw_check, M10K" */;
 	 
     always @ (posedge clk) begin
         if (we) begin
@@ -1010,9 +1015,6 @@ module mandelbrot_top #(
 	input signed [26:0] pixel_increment_x,
 	input signed [26:0] pixel_increment_y,
 
-	// initial load begin	
-	output reg start,
-	// initial load done 
 	output reg done, 
 
 
@@ -1072,7 +1074,6 @@ module mandelbrot_top #(
 
 	always @(posedge clk) begin
 		if (reset) begin
-			start <= 1'b1;
 			done <= 1'b0;
 			current_state <= CALC;
 			curr_x <= x_start;
@@ -1126,7 +1127,6 @@ module mandelbrot_top #(
 				end
 				DONE: begin
 					done <= 1'b1;
-					start <= 1'b0;
 					mem_we <= 1'b0;
 				end
 			endcase
