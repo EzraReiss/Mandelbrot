@@ -1,7 +1,9 @@
 `define NUM_ITERATORS 1
-`define X_PIXEL_MAX (640 / `NUM_ITERATORS) - 1
+`define X_PIXEL_MAX 640 / `NUM_ITERATORS - 1
 `define Y_PIXEL_MAX 480 - 1
-`define MEM_MAX ((480*640) / `NUM_ITERATORS) - 1
+`define MEM_MAX 480*640 / `NUM_ITERATORS - 1
+`define STEP_SIZE_X 0.0046 * NUM_ITERATORS //verify the output type of this
+`define STEP_SIZE_Y 0.0046
 
 
 module DE1_SoC_Computer (
@@ -401,46 +403,17 @@ reg 		[9:0] 	y_coord ;
 wire 		[9:0]		next_x ;
 wire 		[9:0] 	next_y ;
 
+wire [31:0] pio_reset;
+wire [31:0] pio_zoom;
+wire signed [31:0] pio_pan_x;
+wire signed [31:0] pio_pan_y;
 
-// logic for checkerboard pattern - commented out to avoid multiple drivers
-/*
-always@(posedge M10k_pll) begin
-	// Zero everything in reset
-	if (~KEY[0]) begin
-		arbiter_state <= 8'd_0 ;
-		vga_reset <= 1'b_1 ;
-		x_coord <= 10'd_0 ;
-		y_coord <= 10'd_0 ;
-	end
-	// Otherwiser repeatedly write a large checkerboard to memory
-	else begin
-		if (arbiter_state == 8'd_0) begin
-			vga_reset <= 1'b_0 ;
-			write_enable <= 1'b_1 ;
-			write_address <= (19'd_640 * y_coord) + x_coord ;
-			if (x_coord < 10'd_320) begin
-				if (y_coord < 10'd_240) begin
-					write_data <= 8'b_111_000_00 ;
-				end
-				else begin
-					write_data <= 8'b_000_111_00 ;
-				end
-			end
-			else begin
-				if (y_coord < 10'd_240) begin
-					write_data <= 8'b_000_000_11 ;
-				end
-				else begin
-					write_data <= 8'b_111_111_00 ;
-				end
-			end
-			x_coord <= (x_coord==10'd_639)?10'd_0:(x_coord + 10'd_1) ;
-			y_coord <= (x_coord==10'd_639)?((y_coord==10'd_479)?10'd_0:(y_coord+10'd_1)):y_coord ;
-			arbiter_state <= 8'd_0 ;
-		end
-	end
-end
-*/
+wire [31:0] pio_start;
+wire [31:0] pio_done;
+
+assign pio_start [31:1] = 31'b0;
+assign pio_done [31:1] = 31'b0;
+
 
 // Reset logic for VGA (since we commented out the block above)
 always@(posedge M10k_pll) begin
@@ -450,6 +423,8 @@ always@(posedge M10k_pll) begin
 		vga_reset <= 1'b_0;
 	end
 end
+
+
 
 // Instantiate memory
 M10K_1000_8 pixel_data( .q(M10k_out), // contains pixel color (8 bit) for display
@@ -476,18 +451,22 @@ vga_driver DUT   (	.clock(vga_pll),
 							.blank(VGA_BLANK_N)
 );
 
-wire signed [26:0] pixel_increment;
-assign pixel_increment = 27'sd39000; // Step size approx 0.0046 (x of -2 to 1, y starts at 1)
+wire signed [26:0] pixel_increment_x;
+wire signed [26:0] pixel_increment_y;
+
+assign pixel_increment_x = `STEP_SIZE_X >> pio_zoom;
+assign pixel_increment_y = `STEP_SIZE_Y >> pio_zoom;
 
 mandelbrot_top mandelbrot_unit (
-	.reset(~KEY[0]),
+	.reset(~KEY[0] || pio_reset[0]),
 	.clk(M10k_pll),
-	.x_start(-27'sd16777216), // -2.0 in 4.23 fixed point
-	.y_start(27'sd8388608),   // 1.0 in 4.23 fixed point
-	.pixel_increment(pixel_increment),
+	.x_start(pio_pan_x[26:0]), // -2.0 in 4.23 fixed point
+	.y_start(pio_pan_y[26:0]),   // 479*39000/2: rows 0 & 479 exactly mirror, rows 239/240 straddle y=0
+	.pixel_increment_x(pixel_increment_x),
+	.pixel_increment_y(pixel_increment_y),
 
-	.start(),
-	.done(), 
+	.start(pio_start[0]),
+	.done(pio_done[0]), 
 	.mem_write_data(write_data),
 	.mem_write_address(write_address),
 	.mem_we(write_enable)
@@ -532,7 +511,15 @@ Computer_System The_System (
 	.memory_mem_odt		(HPS_DDR3_ODT),
 	.memory_mem_dm			(HPS_DDR3_DM),
 	.memory_oct_rzqin		(HPS_DDR3_RZQ),
-		  
+
+	//pio
+	.pio_finish_external_connection_export(pio_done),
+	.pio_pan_x_external_connection_export (pio_pan_x),
+	.pio_pan_y_external_connection_export (pio_pan_y),
+	.pio_reset_external_connection_export (pio_reset),
+	.pio_start_external_connection_export (pio_start),
+	.pio_zoom_external_connection_export  (pio_zoom),
+
 	// Ethernet
 	.hps_io_hps_io_gpio_inst_GPIO35	(HPS_ENET_INT_N),
 	.hps_io_hps_io_emac1_inst_TX_CLK	(HPS_ENET_GTX_CLK),
@@ -967,7 +954,8 @@ module mandelbrot_top (
 	input clk,
 	input signed [26:0] x_start,
 	input signed [26:0] y_start,
-	input signed [26:0] pixel_increment,
+	input signed [26:0] pixel_increment_x,
+	input signed [26:0] pixel_increment_y,
 
 	// initial load begin	
 	output reg start,
@@ -989,9 +977,9 @@ module mandelbrot_top (
 	reg [1:0] next_state;
 
 	reg signed [26:0] curr_x, curr_y;
-	reg [10:0] pixel_x, pixel_y;
+	reg [9:0] pixel_x, pixel_y;
 
-	reg signed [9:0] next_pixel_x, next_pixel_y;
+	reg [9:0] next_pixel_x, next_pixel_y;
 	reg signed [26:0] next_x, next_y;
 
 //	reg [$clog2(`MEM_MAX+1):0] mem_write_address_next;
@@ -1060,6 +1048,7 @@ module mandelbrot_top (
 					else if (iterator_in_val) begin
 						// in_val was asserted for one cycle, deassert it
 						iterator_in_val <= 1'b0;
+						mem_we <= 1'b0;
 					end
 					else if (iterator_out_val) begin
 						// Iterator finished - write result and advance
@@ -1074,7 +1063,7 @@ module mandelbrot_top (
 					end
 					else begin
 						iterator_in_val <= 1'b0;
-						iterator_out_rdy <= 1'b0;
+						iterator_out_rdy <= 1'b1;
 						mem_we <= 1'b0;
 					end
 
@@ -1090,7 +1079,6 @@ module mandelbrot_top (
 	end
 
 
-
 	
 
 	always @(*) begin
@@ -1098,11 +1086,11 @@ module mandelbrot_top (
 			next_pixel_x = 0;
 			next_pixel_y = pixel_y + 1; 
 			next_x = x_start;
-			next_y = curr_y - pixel_increment;
+			next_y = curr_y - pixel_increment_y;
 		end
 		else begin
 			next_pixel_x = pixel_x + 1; 
-			next_x = curr_x + pixel_increment;
+			next_x = curr_x + pixel_increment_x;
 			next_pixel_y = pixel_y;
 			next_y = curr_y;
 		end
@@ -1135,34 +1123,34 @@ module color_scheme (
 );
 	always @(*) begin
 		if (counter >= `ITER_MAX) begin
-			color_reg = 8'b_000_000_00 ; // black
+		color_reg = 8'b_000_000_00 ; // black
 		end
 		else if (counter >= (`ITER_MAX >>> 1)) begin
-			color_reg = 8'b_011_001_00 ; // white
+		color_reg = 8'b_011_001_00 ; // white
 		end
 		else if (counter >= (`ITER_MAX >>> 2)) begin
-			color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
+		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
 		end
 		else if (counter >= (`ITER_MAX >>> 3)) begin
-			color_reg = 8'b_101_010_01 ;
+		color_reg = 8'b_101_010_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 4)) begin
-			color_reg = 8'b_011_001_01 ;
+		color_reg = 8'b_011_001_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 5)) begin
-			color_reg = 8'b_001_001_01 ;
+		color_reg = 8'b_001_001_01 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 6)) begin
-			color_reg = 8'b_011_010_10 ;
+		color_reg = 8'b_011_010_10 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 7)) begin
-			color_reg = 8'b_010_100_10 ;
+		color_reg = 8'b_010_100_10 ;
 		end
 		else if (counter >= (`ITER_MAX >>> 8)) begin
-			color_reg = 8'b_010_100_10 ;
+		color_reg = 8'b_010_100_10 ;
 		end
 		else begin
-			color_reg = 8'b_010_100_10 ;
+		color_reg = 8'b_010_100_10 ;
 		end
 	end
 endmodule
