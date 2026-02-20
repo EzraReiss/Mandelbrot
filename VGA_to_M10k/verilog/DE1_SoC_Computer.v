@@ -1027,133 +1027,148 @@ endmodule
 // FSM iterator uses only 1 DSP
 //
 module fsm_iterator (
+    input reset,
+    input clk,
+    input in_val,
+    output reg in_rdy,
 
-	input reset,
-	input clk,
-	input in_val,
-	output reg in_rdy,
+    input signed  [26:0] in_c_r,
+    input signed  [26:0] in_c_i,
 
-	input signed  [26:0] in_c_r,
-	input signed  [26:0] in_c_i,
-
-	output reg signed [$clog2(`ITER_MAX):0] iter_count,
-	output escape_condition,
-	output reg out_val,
-	input out_rdy
+    output reg signed [$clog2(`ITER_MAX):0] iter_count,
+    output escape_condition,
+    output reg out_val,
+    input out_rdy
 );
-	localparam [1:0] CALC = 2'b00,
-				DONE = 2'b01;
-	
-	localparam [1:0] CALC_1 = 2'b00,
-					 CALC_2 = 2'b01,
-					 CALC_3 = 2'b10;
+    // state machine encoding 
+    localparam [2:0] IDLE   = 3'b000,
+                     CALC_1 = 3'b001,
+                     CALC_2 = 3'b010,
+                     CALC_3 = 3'b011,
+                     DONE   = 3'b100;
+                     
+    reg [2:0] current_state = IDLE;
+    reg [2:0] next_state;
 
-	reg [1:0] current_state;
-	reg [1:0] next_state;
+    // internal registers for iterative calculations
+    reg signed [26:0] zi, zr, c_r, c_i;
+    reg signed [26:0] zr_sq_reg, zi_sq_reg;
+    wire signed [26:0] zr_next, zi_next, z_mag_sq;
 
-	reg [1:0] calc_state;
-	reg [1:0] next_calc_state;
 
-	always @ (posedge clk) begin
-		if (reset) begin
-			current_state <= CALC;
-			calc_state <= CALC_1;
-		end
-		else begin
-			current_state <= next_state;
-			calc_state <= next_calc_state;		
-		end
+   // instantiate ONE multiplier 
+    reg  signed [26:0] mult_in_a, mult_in_b;
+    wire signed [26:0] mult_out;
 
-	end
+    signed_mult single_mult(mult_out, mult_in_a, mult_in_b);
 
-	always @ (*) begin
-		case (current_state)
-			CALC: begin
-				case (calc_state) 
-					CALC_1: begin
-						next_calc_state = CALC_2;
-					end
+    always @(posedge clk) begin
+        case (current_state)
+            IDLE: begin
+                if (in_val) begin
+                    c_r <= in_c_r;
+                    c_i <= in_c_i;
+                    zi <= 27'sd0;
+                    zr <= 27'sd0;
+                    zr_sq_reg <= 27'sd0;
+                    zi_sq_reg <= 27'sd0;
+                    iter_count <= 0;
+                end
+            end
+            CALC_1: begin
+                zr_sq_reg <= mult_out;
+            end
+            CALC_2: begin
+                zi_sq_reg <= mult_out;
+            end
+            CALC_3: begin
+                zi <= zi_next;
+                zr <= zr_next;
+                iter_count <= iter_count + 1;
+            end
+            DONE: begin
+                // do nothing
+            end
+        endcase
 
-					CALC_2: begin
-						next_calc_state = CALC_3;
-					end
+        // update state
+        if (reset) begin
+            current_state <= IDLE;
+        end else begin
+            current_state <= next_state;
+        end
+    end
 
-					CALC_3: begin
-						// If escape condition met, set next_state to DONE
-						if (escape_condition) begin
-							next_state = DONE;
-						end
-						else begin
-							next_calc_state = CALC_1;
-						end
-					end
-				endcase
-			end
-			DONE: begin
-				if (out_rdy) begin
-					next_state = CALC;
-					next_calc_state = CALC_1;
-				end
-				else begin
-					next_state = DONE;
-					next_calc_state = CALC_1;
-				end
-			end
-		endcase
-	end
+    // next state and output logic
+    always @(*) begin
+        next_state = current_state;
+        in_rdy = 1'b0;
+        out_val = 1'b0;
 
-	reg signed [26:0] zi, zr, zr_sq, zi_sq, zr_next, zi_next, z_mag_sq, zr_sq_next, zi_sq_next, zr_zi, zr_zi2, c_r, c_i, a, b, y;	
-	signed_mult mult_a_b_y(a, b, y);
+        case (current_state)
+            IDLE: begin
+                in_rdy = 1'b1;
+                if (in_val) begin
+                    next_state = CALC_1;
+                end
+            end
+            CALC_1: begin
+                next_state = CALC_2;
+            end
+            CALC_2: begin
+                next_state = CALC_3;
+            end
+            CALC_3: begin
+                if (escape_condition) begin
+                    next_state = DONE;
+                end else begin
+                    next_state = CALC_1;
+                end
+            end
+            DONE: begin
+                out_val = 1'b1;
+                if (out_rdy) begin
+                    next_state = IDLE;
+                end
+            end
+        endcase
+    end
 
-	always @ (*) begin
-		a = 0;
-		b = 0;
-		zr_zi = zr_zi_reg;       
-		zr_sq_next = zr_sq_reg;  
-		zi_sq_next = zi_sq_reg;  
-		
-		zr_next = zr;            
-		zi_next = zi;            
-		z_mag_sq = 0;            
+    // multiplier input mux based on state
+    always @(*) begin
+        case (current_state)
+            CALC_1: begin
+                mult_in_a = zr;
+                mult_in_b = zr;
+            end
+            CALC_2: begin
+                mult_in_a = zi;
+                mult_in_b = zi;
+            end
+            CALC_3, DONE: begin 
+                mult_in_a = zr;
+                mult_in_b = zi;
+            end
+            default: begin
+                mult_in_a = 27'sd0;
+                mult_in_b = 27'sd0;
+            end
+        endcase
+    end
 
-		case (calc_state)
-			CALC_1: begin
-				// Compute zr * zi
-				a = zr;
-				b = zi;
-				zr_zi = y;
-				
-				zi_next = (zr_zi <<< 1) + c_i;
-			end
+    // combinational arithmetic
+    assign zr_next = zr_sq_reg - zi_sq_reg + c_r;
+    assign zi_next = (mult_out <<< 1) + c_i;  
+    assign z_mag_sq = zr_sq_reg + zi_sq_reg;
 
-			CALC_2: begin
-				// Compute zr^2 (zr * zr)
-				a = zr;
-				b = zr;    // Both inputs must be zr
-				zr_sq_next = y; // Capture zr squared
-			end
-
-			CALC_3: begin
-				// Compute zi^2 (zi * zi)
-				a = zi;
-				b = zi;    // Both inputs must be zi
-				zi_sq_next = y; // Capture zi squared
-
-				// Now that we have both squares, we can finish the math
-				zr_next = zr_sq_next - zi_sq_next + c_r;
-				z_mag_sq = zr_sq_next + zi_sq_next;
-			end 
-			
-			default: begin
-				// Default state behavior
-				a = 0;
-				b = 0;
-			end
-		endcase
-	end
+    assign escape_condition = (z_mag_sq > $signed(27'h2000000)) 
+                            || (iter_count == `ITER_MAX - 1)
+                            || (zi_next > $signed(27'h1000000)) 
+                            || (zi_next < $signed(-27'h1000000)) 
+                            || (zr_next > $signed(27'h1000000)) 
+                            || (zr_next < $signed(-27'h1000000));
 
 endmodule
-
 
 module mandelbrot_top #(
 	parameter ITERATOR_ID   = 0,
@@ -1199,7 +1214,7 @@ module mandelbrot_top #(
 	reg iterator_out_rdy;
 	wire [$clog2(`ITER_MAX):0] iterator_iter_count;
 	// Iterator instance
-	iterator iter1 (
+	fsm_iterator iter1 (
 		.reset(iterator_reset),
 		.clk(clk),
 		.in_val(iterator_in_val),
