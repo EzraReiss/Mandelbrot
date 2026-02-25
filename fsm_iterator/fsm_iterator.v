@@ -11,6 +11,10 @@ module signed_mult (
     assign out = {mult_out[53], mult_out[48:23]};
 endmodule
 
+
+
+
+
 module fsm_iterator (
     input reset,
     input clk,
@@ -146,11 +150,32 @@ module fsm_iterator (
     assign zi_next = (mult_out <<< 1) + c_i;  
     assign z_mag_sq = zr_sq_reg + zi_sq_reg;
 
-    assign escape_condition = (z_mag_sq > $signed(27'h2000000)) 
+    assign escape_condition = (z_mag_sq > $signed(27'h2000000))
+                            || z_mag_sq[26]
                             || (iter_count == `ITER_MAX - 1)
-                            || (zi_next > $signed(27'h1000000)) 
-                            || (zi_next < $signed(-27'h1000000)) 
-                            || (zr_next > $signed(27'h1000000)) 
-                            || (zr_next < $signed(-27'h1000000));
-
+                            || (zr > $signed(27'h1000000))
+                            || (zr < $signed(-27'h1000000))
+                            || (zi > $signed(27'h1000000))
+                            || (zi < $signed(-27'h1000000));
 endmodule
+
+// module varial_bit_multiply (
+//     input clk,
+//     input reset, 
+    
+//     //Is it 18 bit multiply or 27 bit multiply?
+//     input is_high_resolution,
+
+//     input signed [26:0] a,
+//     input signed [26:0] b,
+//     output signed [26:0] out
+// );
+
+// always @(posedge clk) begin
+//     if (reset) begin
+        
+//     end
+// end
+
+
+// endmodule
