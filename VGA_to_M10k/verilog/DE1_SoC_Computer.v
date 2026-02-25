@@ -855,6 +855,12 @@ endmodule
 // http://people.ece.cornell.edu/land/courses/ece5760/DE1_SOC/HDL_style_qts_qii51007.pdf
 //============================================================
 
+
+/*
+AI made this:
+opus modified this M10K module to be able to generate non-powers of 2 sizes
+so it can make it do 5 BRAMs per M10K for 64 iterators
+*/
 module M10K_1000_8 #(
     parameter MEM_DEPTH = 307200
 )( 
@@ -863,15 +869,38 @@ module M10K_1000_8 #(
     input [18:0] write_address, read_address,
     input we, clk
 );
-	 // force M10K ram style
-    reg [7:0] mem [MEM_DEPTH-1:0]  /* synthesis ramstyle = "no_rw_check, M10K" */;
-	 
-    always @ (posedge clk) begin
-        if (we) begin
-            mem[write_address] <= d;
-		  end
-        q <= mem[read_address]; // q doesn't get d in this clock cycle
-    end
+    // Each M10K block holds 1024 entries at 8-bit width.
+    // Manually partition into exactly ceil(MEM_DEPTH/1024) sub-blocks
+    // so Quartus uses one M10K per sub-block with no power-of-2 rounding.
+    localparam BLOCK_DEPTH = 1024;
+    localparam NUM_BLOCKS  = (MEM_DEPTH + BLOCK_DEPTH - 1) / BLOCK_DEPTH;
+    localparam SEL_BITS    = (NUM_BLOCKS > 1) ? $clog2(NUM_BLOCKS) : 1;
+
+    wire [9:0]          sub_addr_w   = write_address[9:0];
+    wire [9:0]          sub_addr_r   = read_address[9:0];
+    wire [SEL_BITS-1:0] block_sel_w  = write_address[SEL_BITS+9:10];
+    wire [SEL_BITS-1:0] block_sel_r  = read_address[SEL_BITS+9:10];
+
+    reg [7:0]           sub_q [0:NUM_BLOCKS-1];
+    reg [SEL_BITS-1:0]  block_sel_r_reg;
+
+    always @(posedge clk)
+        block_sel_r_reg <= block_sel_r;
+
+    genvar i;
+    generate
+        for (i = 0; i < NUM_BLOCKS; i = i + 1) begin : blk
+            reg [7:0] mem [0:BLOCK_DEPTH-1] /* synthesis ramstyle = "no_rw_check, M10K" */;
+            always @(posedge clk) begin
+                if (we && block_sel_w == i[SEL_BITS-1:0])
+                    mem[sub_addr_w] <= d;
+                sub_q[i] <= mem[sub_addr_r];
+            end
+        end
+    endgenerate
+
+    always @(*)
+        q = sub_q[block_sel_r_reg];
 endmodule
 
 //////////////////////////////////////////////////
