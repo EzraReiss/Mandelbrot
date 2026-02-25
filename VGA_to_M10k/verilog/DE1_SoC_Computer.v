@@ -1,7 +1,8 @@
-`define NUM_ITERATORS 4
-`define X_PIXEL_MAX (640 / `NUM_ITERATORS - 1)
+`define NUM_ITERATORS 87
+`define COLS_PER_BANK ((640 + `NUM_ITERATORS - 1) / `NUM_ITERATORS) // ceil(640/N)
+`define X_PIXEL_MAX (`COLS_PER_BANK - 1)
 `define Y_PIXEL_MAX (480 - 1)
-`define MEM_MAX (480*640 / `NUM_ITERATORS - 1)
+`define MEM_MAX (`COLS_PER_BANK * 480 - 1)
 // Base step in 4.23 fixed point: 39000 / 2^23 ≈ 0.00464 per pixel at zoom=0
 `define BASE_STEP 27'sd39000
 
@@ -409,14 +410,11 @@ always @(*) begin
 	M10k_out = bank_q[next_x % `NUM_ITERATORS];
 end
 
-// Per-bank read address: (640*y + x) / N  — DSP-free using shift-adds
-// 640*y = (y << 9) + (y << 7)  since 640 = 512 + 128
-// Division by N (power of 2) is a right shift — free in hardware
-wire [18:0] flat_read_addr;
-assign flat_read_addr = ({9'd0, next_y} << 9) + ({9'd0, next_y} << 7) + {9'd0, next_x};
+// Per-bank read address: local_col + COLS_PER_BANK * y
+// local_col = x / N (Quartus optimizes constant division into reciprocal multiply)
+// Works for any NUM_ITERATORS, not just powers of 2.
 wire [18:0] bank_read_addr;
-// Guard: when NUM_ITERATORS=1, $clog2(1)=0, shift by 0 is a no-op (correct)
-assign bank_read_addr = (`NUM_ITERATORS == 1) ? flat_read_addr : (flat_read_addr >> $clog2(`NUM_ITERATORS));
+assign bank_read_addr = (next_x / `NUM_ITERATORS) + `COLS_PER_BANK * next_y;
 
 // Done when ALL iterators are finished
 reg all_done;
@@ -512,9 +510,9 @@ generate
 			.mem_we(iter_we[gi])
 		);
 
-		// Each iterator has its own M10K bank (sized for 640/N columns × 480 rows)
+		// Each iterator has its own M10K bank (sized for ceil(640/N) columns × 480 rows)
 		M10K_1000_8 #(
-			.MEM_DEPTH(480 * 640 / `NUM_ITERATORS)
+			.MEM_DEPTH(`COLS_PER_BANK * 480)
 		) pixel_data( 
 			.q(bank_q[gi]),
 			.d(iter_write_data[gi]),
