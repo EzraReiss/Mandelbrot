@@ -159,23 +159,41 @@ module fsm_iterator (
                             || (zi < $signed(-27'h1000000));
 endmodule
 
-// module varial_bit_multiply (
-//     input clk,
-//     input reset, 
+module signed_mult_18_bit (
+    output signed [17:0] out,
+    input  signed [17:0] a,
+    input  signed [17:0] b
+);
+    // intermediate full bit length
+    wire signed [35:0] mult_out;
+    assign mult_out = a * b;
+    // select bits for 4.23 fixed point
+    assign out = {mult_out[35], mult_out[30:15]};
+endmodule
+
+
+module varial_bit_multiply (
+    input clk,
+    input reset, 
     
-//     //Is it 18 bit multiply or 27 bit multiply?
-//     input is_high_resolution,
+    //Is it 18 bit multiply or 27 bit multiply?
+    input is_high_resolution,
 
-//     input signed [26:0] a,
-//     input signed [26:0] b,
-//     output signed [26:0] out
-// );
+    input signed [26:0] a,
+    input signed [26:0] b,
+    output signed [26:0] out
+);
 
-// always @(posedge clk) begin
-//     if (reset) begin
+    localparam [1:0] state_idle = 2'b00,
+
+    reg signed [17:0] low_res_mult_in_a, low_res_mult_in_b;
+    wire signed [17:0] low_res_mult_out;
+
+
+
+always @(posedge clk) begin
+    if (reset) begin
         
-//     end
-// end
-
-
-// endmodule
+    end
+end
+endmodule
