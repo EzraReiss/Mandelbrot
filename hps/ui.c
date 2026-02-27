@@ -56,6 +56,7 @@ int fd;
 void *mouse_handler(void *arg); // handles mouse input for zoom and pan
 void *fpga_handler(void *arg);  // handles communication with FPGA via PIO ports
 void *console_reset(void *arg); // handles console input for resetting view
+// void *console_set_iter(void *arg); // handles console input for setting max iterations
 
 // State is tracked as the CENTER of the view in complex-plane coordinates.
 // The corner (x_start, y_start) is computed from center + half-extent.
@@ -64,6 +65,7 @@ volatile double center_x = -0.5; // center of the standard Mandelbrot view
 volatile double center_y = 0.0;
 volatile bool state_dirty = true; // set true when any parameter changes
 volatile bool running = false;
+volatile int iter_max = 1000; // default max iterations
 
 // Mutex to protect shared state
 pthread_mutex_t state_mutex;
@@ -111,11 +113,14 @@ int main(void)
   pthread_create(&mouse_thread, NULL, mouse_handler, NULL);
   pthread_create(&fpga_thread, NULL, fpga_handler, NULL);
   pthread_create(&console_thread, NULL, console_reset, NULL);
+  // pthread_create(&console_iter_thread, NULL, console_set_iter, NULL);
 
   // wait for threads to finish
   pthread_join(mouse_thread, NULL);
   pthread_join(fpga_thread, NULL);
   pthread_join(console_thread, NULL);
+  // pthread_join(console_iter_thread, NULL);
+
   // clean up mutex
   pthread_mutex_destroy(&state_mutex);
   return 0;
@@ -242,6 +247,7 @@ void *fpga_handler(void *arg)
       *f_zoom_ptr = local_zoom;
       *f_pan_x_ptr = DOUBLE_TO_FIXED_4_23(x_start);
       *f_pan_y_ptr = DOUBLE_TO_FIXED_4_23(y_start);
+      *f_iter_max_ptr = iter_max;
       usleep(1);
       *f_reset_ptr = 0x0000;
 
@@ -277,23 +283,37 @@ void* console_reset(void* arg)
       zoom_level = 0;
       state_dirty = true;
       printf("Reset view to default\n");
-    }
-  }
-}
-
-void* console_set_iter(void* arg) 
-{
-  while(1) {
-    char input[20];
-    fgets(input, 20, stdin);
-    if (input[0] == 'i') {
+    } else if (input[0] == 'i') {
+      printf("Enter max iterations (current %d): ", iter_max);
       fgets(input, 20, stdin);
       int iter_max = atoi(input);
       if (iter_max > 0 && iter_max <= 10000) {
         *f_iter_max_ptr = iter_max;
         printf("Set max iterations to %d\n", iter_max);
+        state_dirty = true;
       } else {
         printf("Invalid iteration count. Must be between 1 and 10000.\n");
+      }
     }
   }
 }
+
+// void* console_set_iter(void* arg) 
+// {
+//   while(1) {
+//     char input[20];
+//     fgets(input, 20, stdin);
+//     if (input[0] == 'i') {
+//       printf("Enter max iterations (current %d): ", iter_max);
+//       fgets(input, 20, stdin);
+//       int iter_max = atoi(input);
+//       if (iter_max > 0 && iter_max <= 10000) {
+//         *f_iter_max_ptr = iter_max;
+//         printf("Set max iterations to %d\n", iter_max);
+//         state_dirty = true;
+//       } else {
+//         printf("Invalid iteration count. Must be between 1 and 10000.\n");
+//       }
+//     }
+//   }
+// }

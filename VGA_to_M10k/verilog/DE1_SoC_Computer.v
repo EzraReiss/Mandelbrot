@@ -443,6 +443,7 @@ wire signed [31:0] pio_pan_y;
 // pio_done:                                      FPGA→ARM (FPGA writes, ARM reads)
 wire [31:0] pio_start;
 wire [31:0] pio_done;
+wire [31:0] pio_iter_max;
 assign pio_done[31:1] = 31'b0;
 assign pio_done[0]    = all_done;
 
@@ -581,7 +582,8 @@ Computer_System The_System (
 	.pio_reset_external_connection_export (pio_reset),
 	.pio_start_external_connection_export (pio_start),
 	.pio_zoom_external_connection_export  (pio_zoom),
-
+	.pio_iter_max_external_connection_export(pio_iter_max),
+	
 	// Ethernet
 	.hps_io_hps_io_gpio_inst_GPIO35	(HPS_ENET_INT_N),
 	.hps_io_hps_io_emac1_inst_TX_CLK	(HPS_ENET_GTX_CLK),
@@ -922,7 +924,10 @@ endmodule
 
 `define ITER_MAX 1000
 
-module iterator (
+module iterator #(
+ iter_max=1000
+)
+(
 	input reset,
 	input clk,
 	input in_val,
@@ -1047,8 +1052,8 @@ module fsm_iterator (
 
     input signed  [26:0] in_c_r,
     input signed  [26:0] in_c_i,
-
-    output reg signed [$clog2(`ITER_MAX):0] iter_count,
+	 input [31:0] iter_max,
+    output reg signed [31:0] iter_count,
     output escape_condition,
     output reg out_val,
     input out_rdy
@@ -1176,7 +1181,7 @@ module fsm_iterator (
 
     assign escape_condition = (z_mag_sq > $signed(27'h2000000))
                             || z_mag_sq[26]
-                            || (iter_count == `ITER_MAX - 1)
+                            || (iter_count == iter_max - 1)
                             || (zr > $signed(27'h1000000))
                             || (zr < $signed(-27'h1000000))
                             || (zi > $signed(27'h1000000))
@@ -1195,6 +1200,7 @@ module mandelbrot_top #(
 	input signed [26:0] y_start,
 	input signed [26:0] pixel_increment_x,
 	input signed [26:0] pixel_increment_y,
+	input [31:0] iter_max,
 
 	output reg done, 
 
@@ -1208,7 +1214,9 @@ module mandelbrot_top #(
 	// Valid states. Done is when iterator has finished all of its pixels in a frame.	
 	localparam [1:0] CALC = 2'b01,
 	                 DONE = 2'b10;
-
+						  
+	reg [31:0] iter_max_reg;
+						  
 	reg  [1:0] current_state;
 	reg [1:0] next_state;
 
@@ -1227,9 +1235,10 @@ module mandelbrot_top #(
 	wire iterator_escape_condition;
 	wire iterator_out_val;
 	reg iterator_out_rdy;
-	wire [$clog2(`ITER_MAX):0] iterator_iter_count;
+	wire [31:0] iterator_iter_count;
 	// Iterator instance
-	fsm_iterator iter1 (
+	fsm_iterator iter1 
+	(
 		.reset(iterator_reset),
 		.clk(clk),
 		.in_val(iterator_in_val),
@@ -1237,6 +1246,7 @@ module mandelbrot_top #(
 		.in_c_r(curr_x),
 		.in_c_i(curr_y),
 		.iter_count(iterator_iter_count),
+		.iter_max(iter_max_reg),
 		.escape_condition(iterator_escape_condition),
 		.out_val(iterator_out_val),
 		.out_rdy(iterator_out_rdy)
@@ -1250,6 +1260,7 @@ module mandelbrot_top #(
 	color_scheme cs1 (
 		.clk(clk),
 		.counter(iterator_iter_count),
+		.iter_max(iter_max_reg),
 		.color_reg(color_reg)
 	);
 
@@ -1261,7 +1272,9 @@ module mandelbrot_top #(
 			curr_y <= y_start;
 			pixel_x <= 0;
 			pixel_y <= 0;
+			
 			iterator_reset <= 1'b1;
+			iter_max_reg <= iter_max;
 			
 			mem_write_address <= 0;
 			mem_we <= 1'b0;
@@ -1356,43 +1369,45 @@ endmodule
 
 module color_scheme (
 	input clk,
-	input [$clog2(`ITER_MAX):0] counter, //iterator_iter_count 
+	input [31:0] counter, //iterator_iter_count 
+	input [31:0] iter_max,
 	output reg [7:0] color_reg
+
 );
 	always @(*) begin
-		if (counter >= `ITER_MAX) begin
+		if (counter >= iter_max) begin
 		color_reg = 8'b_000_000_00 ; // black
 		color_reg = 8'b_000_000_00 ; // black
 		end
-		else if (counter >= (`ITER_MAX >>> 1)) begin
+		else if (counter >= (iter_max >>> 1)) begin
 		color_reg = 8'b_011_001_00 ; // white
 		color_reg = 8'b_011_001_00 ; // white
 		end
-		else if (counter >= (`ITER_MAX >>> 2)) begin
+		else if (counter >= (iter_max >>> 2)) begin
 		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
 		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
 		end
-		else if (counter >= (`ITER_MAX >>> 3)) begin
+		else if (counter >= (iter_max >>> 3)) begin
 		color_reg = 8'b_101_010_01 ;
 		color_reg = 8'b_101_010_01 ;
 		end
-		else if (counter >= (`ITER_MAX >>> 4)) begin
+		else if (counter >= (iter_max >>> 4)) begin
 		color_reg = 8'b_011_001_01 ;
 		color_reg = 8'b_011_001_01 ;
 		end
-		else if (counter >= (`ITER_MAX >>> 5)) begin
+		else if (counter >= (iter_max >>> 5)) begin
 		color_reg = 8'b_001_001_01 ;
 		color_reg = 8'b_001_001_01 ;
 		end
-		else if (counter >= (`ITER_MAX >>> 6)) begin
+		else if (counter >= (iter_max >>> 6)) begin
 		color_reg = 8'b_011_010_10 ;
 		color_reg = 8'b_011_010_10 ;
 		end
-		else if (counter >= (`ITER_MAX >>> 7)) begin
+		else if (counter >= (iter_max >>> 7)) begin
 		color_reg = 8'b_010_100_10 ;
 		color_reg = 8'b_010_100_10 ;
 		end
-		else if (counter >= (`ITER_MAX >>> 8)) begin
+		else if (counter >= (iter_max >>> 8)) begin
 		color_reg = 8'b_010_100_10 ;
 		color_reg = 8'b_010_100_10 ;
 		end
