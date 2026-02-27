@@ -192,7 +192,7 @@ module karatsuba_multiplier (
     //assume on the caller side a and b are wires from a register
     input signed [26:0] a,
     input signed [26:0] b,
-    output reg signed [26:0] out
+    output reg signed [26:0] out,
 
     input in_val,
     output reg out_val,
@@ -217,7 +217,7 @@ module karatsuba_multiplier (
     wire signed [17:0] low_res_mult_out;
 
     reg signed [17:0] fpm_in_a, fpm_in_b;
-    reg signed [35:0] fpm_out;
+    wire signed [35:0] fpm_out;
 
     full_precision_mult_18_bit full_precision_mult(fpm_out, fpm_in_a, fpm_in_b);
 
@@ -267,89 +267,115 @@ module karatsuba_multiplier (
     wire [35:0] Z2_shifted;
     assign Z2_shifted = Z2_reg << 34;
 
-    wire signed [37:0] Z1;
+    wire [37:0] Z1;
     assign Z1 = M_reg - Z0_reg - Z2_reg;
 
+    wire [37:0] Z1_shifted;
+    assign Z1_shifted = Z1 << 17;
 
+    wire [63:0] p_mag;
+    assign p_mag = Z0_reg + Z1_shifted + Z2_shifted;
 
+    // p_mag is in unsigned Q8.46 format (54 bits)
+    // Extract 3 integer + 23 fractional bits = magnitude
+    wire [25:0] magnitude = p_mag[48:23];
+    
+    // Re-apply sign for Q4.23 output
+    wire [26:0] signed_result = sign_out ? (~{1'b0, magnitude} + 1) : {1'b0, magnitude};
 
-//Mealy state machine
-always @(posedge clk) begin
-    if (reset) begin
-        
-    end
-    end else begin
-        case (current_state) 
+    //Mealy state machine
+    always @(posedge clk) begin
+        if (reset) begin
             
-        endcase
+        end else begin
+            case (current_state) 
+                state_idle: begin
+                    if (in_val && !is_high_resolution) begin
+                        Z0_reg = Z0;
+                    end
+                end
+
+                state_high_pres_calc_0: begin
+                    Z2_reg = Z2;
+                end
+
+                state_high_pres_calc_1: begin
+                    M_reg = M;
+                end
+
+                state_high_pres_calc_2: begin
+                    //prob don't need this yet might for clock speed issues
+                end
+            endcase
+        end
     end
 
 
-//Mealy outputs as a function of state
-always @(*) begin
-    if (reset) begin
+    //Mealy outputs as a function of state
+    always @(*) begin
+        if (reset) begin
 
-    end else begin
-        case (current_state)
+        end else begin
             fpm_in_a = 0;
             fpm_in_b = 0;
             out = 0;
             next_state = state_idle;
             in_rdy = 1'b0;
             out_val = 1'b0;
-            state_idle: begin
-                if (in_val && !is_high_resolution) begin
-                    out_val = 1'b1;
-                    in_rdy = 1'b1;
-                    fpm_in_a = low_res_mult_in_a;
-                    fpm_in_b = low_res_mult_in_b;
-                    out = low_res_mult_out;
-                    next_state = state_idle;
-                end else if (in_val && is_high_resolution) begin
+            case (current_state)
+                state_idle: begin
+                    if (in_val && !is_high_resolution) begin
+                        out_val = 1'b1;
+                        in_rdy = 1'b1;
+                        fpm_in_a = low_res_mult_in_a;
+                        fpm_in_b = low_res_mult_in_b;
+                        out = low_res_mult_out;
+                        next_state = state_idle;
+                    end else if (in_val && is_high_resolution) begin
+                        out_val = 1'b0;
+                        in_rdy = 1'b0;
+                        out = 27'sd0; //default output since we don't have a valid output
+                        fpm_in_a = AH_extended;
+                        fpm_in_b = BH_extended;
+                        Z0 = fpm_out;
+                        next_state = state_high_pres_calc_0;
+                    end else begin
+                        out_val = 1'b0;
+                        in_rdy = 1'b1;
+                        out = 27'sd0; //default output since we don't have a valid output
+                        next_state = state_idle;
+                    end
+                end
+                state_high_pres_calc_0: begin
                     out_val = 1'b0;
                     in_rdy = 1'b0;
                     out = 27'sd0; //default output since we don't have a valid output
-                    fpm_in_a = AH_extended;
-                    fpm_in_b = BH_extended;
-                    Z0 = fpm_out;
-                    next_state = state_high_pres_calc_0;
-                end else begin
+                    fpm_in_a = AL_extended;
+                    fpm_in_b = BL_extended;
+                    Z2 = fpm_out;
+                    next_state = state_high_pres_calc_1;
+                end
+                state_high_pres_calc_1: begin
                     out_val = 1'b0;
+                    in_rdy = 1'b0;
+                    out = 27'sd0;
+                    fpm_in_a = SA;
+                    fpm_in_b = SB;
+                    Z1 = fpm_out;
+                    next_state = state_high_pres_calc_2; 
+                end
+                state_high_pres_calc_2: begin
+                    out_val = 1'b1;
                     in_rdy = 1'b1;
-                    out = 27'sd0; //default output since we don't have a valid output
+                    fpm_in_a = SA;
+                    fpm_in_b = SB;
+                    M = fpm_out;
+                    Z1 = M - Z0 - Z2;
+                    out = 27'sd0; //need to update this
+
                     next_state = state_idle;
                 end
-            end
-            state_high_pres_calc_0: begin
-                out_val = 1'b0;
-                in_rdy = 1'b0;
-                out = 27'sd0; //default output since we don't have a valid output
-                fpm_in_a = AL_extended;
-                fpm_in_b = BL_extended;
-                Z2 = fpm_out;
-                next_state = state_high_pres_calc_1;
-            end
-            state_high_pres_calc_1: begin
-                out_val = 1'b0;
-                in_rdy = 1'b0;
-                out = 27'sd0;
-                fpm_in_a = SA;
-                fpm_in_b = SB;
-                Z1 = fpm_out;
-                next_state = state_high_pres_calc_2; 
-            end
-            state_high_pres_calc_2: begin
-                out_val = 1'b1;
-                in_rdy = 1'b1;
-                fpm_in_a = SA;
-                fpm_in_b = SB;
-                M = fpm_out;
-                Z1 = M - Z0 - Z2;
-                out = 27'sd0; //need to update this
-
-                next_state = state_idle;
-            end
-        endcase
+            endcase
+        end
     end
-end
 endmodule

@@ -502,7 +502,7 @@ end
 
 genvar gi;
 generate 
-	for (gi = 0; gi < `NUM_ITERATORS; gi = gi + 1) begin : gen_iter
+	for (gi = 0; gi < `NUM_ITERATORS; gi = gi + 1) begin : gen_iter	
 		// Each iterator computes every Nth column
 		mandelbrot_top #(
 			.ITERATOR_ID(gi),
@@ -514,6 +514,7 @@ generate
 			.y_start(pio_pan_y[26:0]),
 			.pixel_increment_x(pixel_increment_x),
 			.pixel_increment_y(pixel_increment_y),
+			.iter_max(pio_iter_max),
 
 			.done(iter_done[gi]), 
 			.mem_write_data(iter_write_data[gi]),
