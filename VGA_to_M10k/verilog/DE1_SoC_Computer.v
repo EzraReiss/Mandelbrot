@@ -1,12 +1,10 @@
-`define NUM_ITERATORS 87
+`define NUM_ITERATORS 160
 `define COLS_PER_BANK ((640 + `NUM_ITERATORS - 1) / `NUM_ITERATORS) // ceil(640/N)
 `define X_PIXEL_MAX (`COLS_PER_BANK - 1)
 `define Y_PIXEL_MAX (480 - 1)
 `define MEM_MAX (`COLS_PER_BANK * 480 - 1)
-// Base step in 4.23 fixed point: 39000 / 2^23 ≈ 0.00464 per pixel at zoom=0
 `define BASE_STEP 27'sd39000
-
-`define MEM_SIZE MEM_MAX
+`define ITER_MAX 1000
 
 
 module DE1_SoC_Computer (
@@ -393,26 +391,27 @@ wire 					M10k_pll_locked ;
 // Wires for connecting VGA driver to memory
 wire 		[9:0]	next_x ;
 wire 		[9:0] 	next_y ;
-//AI to make multicore setup faster
-// Per-iterator write signals (each iterator has its own M10K bank)
-wire [7:0]  iter_write_data  [`NUM_ITERATORS-1:0];
+
+// Per-iterator write signals — stores 10-bit iter_count (color computed on VGA read side)
+wire [9:0]  iter_write_data  [`NUM_ITERATORS-1:0];
 wire [18:0] iter_write_addr  [`NUM_ITERATORS-1:0];
 wire        iter_we          [`NUM_ITERATORS-1:0];
 wire        iter_done        [`NUM_ITERATORS-1:0];
 
-// Per-bank M10K read outputs
-wire [7:0]  bank_q           [`NUM_ITERATORS-1:0];
+// Per-bank M10K read outputs (10-bit iter_count)
+wire [9:0]  bank_q           [`NUM_ITERATORS-1:0];
 
-// VGA read mux: select which bank to read based on next_x % NUM_ITERATORS
-// For NUM_ITERATORS = power of 2, this is just the low bits of next_x
-reg  [7:0]  M10k_out;
-always @(*) begin
-	M10k_out = bank_q[next_x % `NUM_ITERATORS];
-end
+// VGA read: select bank and convert iter_count → color on the read side (one shared instance)
+wire [9:0] raw_iter_count;
+assign raw_iter_count = bank_q[next_x % `NUM_ITERATORS];
 
-// Per-bank read address: local_col + COLS_PER_BANK * y
-// local_col = x / N (Quartus optimizes constant division into reciprocal multiply)
-// Works for any NUM_ITERATORS, not just powers of 2.
+wire [7:0] M10k_out;
+color_scheme vga_colorizer (
+	.clk(vga_pll),
+	.counter(raw_iter_count),
+	.color_reg(M10k_out)
+);
+
 wire [18:0] bank_read_addr;
 assign bank_read_addr = (next_x / `NUM_ITERATORS) + `COLS_PER_BANK * next_y;
 
@@ -444,8 +443,13 @@ wire signed [31:0] pio_pan_y;
 wire [31:0] pio_start;
 wire [31:0] pio_done;
 wire [31:0] pio_iter_max;
+
+// all_done is in M10k_pll domain; synchronize to HPS/FPGA fabric clock
+reg [1:0] done_sync;
+always @(posedge CLOCK_50) done_sync <= {done_sync[0], all_done};
+
 assign pio_done[31:1] = 31'b0;
-assign pio_done[0]    = all_done;
+assign pio_done[0]    = done_sync[1];
 
 
 // Reset logic for VGA (since we commented out the block above)
@@ -484,26 +488,33 @@ vga_driver DUT   (	.clock(vga_pll),
 wire signed [26:0] pixel_increment_x;
 wire signed [26:0] pixel_increment_y;
 
-// Arithmetic right-shift (>>>) by zoom divides step by 2^zoom.
-// $signed() cast ensures the shift is arithmetic even in a mixed expression.
-assign pixel_increment_y = $signed(`BASE_STEP)                    >>> pio_zoom[4:0];
-assign pixel_increment_x = ($signed(`BASE_STEP) >>> pio_zoom[4:0]) * `NUM_ITERATORS;
-//assign pixel_increment_x = $signed(`BASE_STEP * `NUM_ITERATORS)   >>> pio_zoom[4:0];
+// SW[0] selects precision: 0 = 18-bit (fast), 1 = 27-bit (Karatsuba, accurate)
+reg [1:0] sw0_sync;
+always @(posedge M10k_pll) sw0_sync <= {sw0_sync[0], SW[0]};
+wire is_high_resolution = sw0_sync[1];
 
+assign pixel_increment_y = $signed(`BASE_STEP)                    >>> pio_zoom[4:0];
+assign pixel_increment_x = $signed(`BASE_STEP * `NUM_ITERATORS)   >>> pio_zoom[4:0];
+
+// Registered iterator offsets — computed once on reset instead of every cycle
 reg signed [26:0] iterator_offset [`NUM_ITERATORS-1:0];
+reg offsets_valid;
 
 integer oi;
-always @(*) begin
-	iterator_offset[0] = 27'sd0;
-	for (oi = 1; oi < `NUM_ITERATORS; oi = oi + 1) begin
-		iterator_offset[oi] = iterator_offset[oi-1] + pixel_increment_y;
+always @(posedge M10k_pll) begin
+	if (~KEY[0] || pio_sync_reset) begin
+		offsets_valid <= 1'b0;
+	end else if (!offsets_valid) begin
+		iterator_offset[0] <= 27'sd0;
+		for (oi = 1; oi < `NUM_ITERATORS; oi = oi + 1)
+			iterator_offset[oi] <= iterator_offset[oi-1] + pixel_increment_y;
+		offsets_valid <= 1'b1;
 	end
 end
 
 genvar gi;
 generate 
 	for (gi = 0; gi < `NUM_ITERATORS; gi = gi + 1) begin : gen_iter	
-		// Each iterator computes every Nth column
 		mandelbrot_top #(
 			.ITERATOR_ID(gi),
 			.NUM_ITERATORS(`NUM_ITERATORS)
@@ -515,6 +526,7 @@ generate
 			.pixel_increment_x(pixel_increment_x),
 			.pixel_increment_y(pixel_increment_y),
 			.iter_max(pio_iter_max[9:0]),
+			.is_high_resolution(is_high_resolution),
 
 			.done(iter_done[gi]), 
 			.mem_write_data(iter_write_data[gi]),
@@ -522,9 +534,9 @@ generate
 			.mem_we(iter_we[gi])
 		);
 
-		// Each iterator has its own M10K bank (sized for ceil(640/N) columns × 480 rows)
 		M10K_1000_8 #(
-			.MEM_DEPTH(`COLS_PER_BANK * 480)
+			.MEM_DEPTH(`COLS_PER_BANK * 480),
+			.DATA_WIDTH(10)
 		) pixel_data( 
 			.q(bank_q[gi]),
 			.d(iter_write_data[gi]),
@@ -889,236 +901,254 @@ opus modified this M10K module to be able to generate non-powers of 2 sizes
 so it can make it do 5 BRAMs per M10K for 64 iterators
 */
 module M10K_1000_8 #(
-    parameter MEM_DEPTH = 307200
+    parameter MEM_DEPTH = 307200,
+    parameter DATA_WIDTH = 10
 )( 
-    output reg [7:0] q,
-    input [7:0] d,
+    output reg [DATA_WIDTH-1:0] q,
+    input [DATA_WIDTH-1:0] d,
     input [18:0] write_address, read_address,
     input we, clk
 );
-	 // force M10K ram style
-    reg [7:0] mem [MEM_DEPTH-1:0]  /* synthesis ramstyle = "no_rw_check, M10K" */;
-	 
-    always @ (posedge clk) begin
-        if (we) begin
-            mem[write_address] <= d;
-		  end
-        q <= mem[read_address]; // q doesn't get d in this clock cycle
+    localparam BLOCK_DEPTH = (DATA_WIDTH <= 8) ? 1024 :
+                             (DATA_WIDTH <= 10) ? 1024 : 512;
+    localparam NUM_BLOCKS  = (MEM_DEPTH + BLOCK_DEPTH - 1) / BLOCK_DEPTH;
+    localparam SEL_BITS    = (NUM_BLOCKS > 1) ? $clog2(NUM_BLOCKS) : 1;
+
+    wire [9:0]          sub_addr_w   = write_address[9:0];
+    wire [9:0]          sub_addr_r   = read_address[9:0];
+    wire [SEL_BITS-1:0] block_sel_w  = write_address[SEL_BITS+9:10];
+    wire [SEL_BITS-1:0] block_sel_r  = read_address[SEL_BITS+9:10];
+
+    reg [DATA_WIDTH-1:0] sub_q [0:NUM_BLOCKS-1];
+    reg [SEL_BITS-1:0]   block_sel_r_reg;
+
+    always @(posedge clk)
+        block_sel_r_reg <= block_sel_r;
+
+    genvar i;
+    generate
+        for (i = 0; i < NUM_BLOCKS; i = i + 1) begin : blk
+            reg [DATA_WIDTH-1:0] mem [0:BLOCK_DEPTH-1] /* synthesis ramstyle = "no_rw_check, M10K" */;
+            always @(posedge clk) begin
+                if (we && block_sel_w == i[SEL_BITS-1:0])
+                    mem[sub_addr_w] <= d;
+                sub_q[i] <= mem[sub_addr_r];
+            end
+        end
+    endgenerate
+
+    always @(*)
+        q = sub_q[block_sel_r_reg];
+endmodule
+
+module full_precision_mult_18_bit (
+    output signed [35:0] out,
+    input  signed [17:0] a,
+    input  signed [17:0] b
+);
+    assign out = a * b;
+endmodule
+
+// Variable-precision multiplier: one 18x18 DSP block.
+// Low-res: combinational Q4.14 multiply (0 extra cycles).
+// High-res: Karatsuba Q4.23 multiply (3 extra cycles).
+module karatsuba_multiplier (
+    input clk,
+    input reset,
+    input is_high_resolution,
+    input signed [26:0] a,
+    input signed [26:0] b,
+    output reg signed [26:0] out,
+    input in_val,
+    input out_rdy,
+    output reg out_val,
+    output reg in_rdy
+);
+    localparam [1:0] IDLE   = 2'b00,
+                     CALC_0 = 2'b01,
+                     CALC_1 = 2'b10,
+                     CALC_2 = 2'b11;
+
+    reg [1:0] current_state;
+    reg [1:0] next_state;
+
+    reg  signed [17:0] fpm_in_a, fpm_in_b;
+    wire signed [35:0] fpm_out;
+    full_precision_mult_18_bit fpm(fpm_out, fpm_in_a, fpm_in_b);
+
+    wire signed [17:0] lo_a = a[26:9];
+    wire signed [17:0] lo_b = b[26:9];
+    wire signed [17:0] lo_out = {fpm_out[35], fpm_out[30:14]};
+
+    wire sign_out = a[26] ^ b[26];
+    wire [26:0] abs_a = a[26] ? (~a + 1) : a;
+    wire [26:0] abs_b = b[26] ? (~b + 1) : b;
+
+    wire [15:0] AL = abs_a[15:0];
+    wire [10:0] AH = abs_a[26:16];
+    wire [15:0] BL = abs_b[15:0];
+    wire [10:0] BH = abs_b[26:16];
+
+    wire [17:0] AH_ext = {7'b0, AH};
+    wire [17:0] BH_ext = {7'b0, BH};
+    wire [17:0] AL_ext = {2'b0, AL};
+    wire [17:0] BL_ext = {2'b0, BL};
+    wire [17:0] SA_ext = {2'b0, AL} + {7'b0, AH};
+    wire [17:0] SB_ext = {2'b0, BL} + {7'b0, BH};
+
+    reg [21:0] Z2_reg;
+    reg [31:0] Z0_reg;
+    reg [33:0] M_reg;
+
+    wire [53:0] Z0_w = {22'b0, Z0_reg};
+    wire [53:0] Z2_w = {32'b0, Z2_reg};
+    wire [53:0] M_w  = {20'b0, M_reg};
+    wire [53:0] Z1_w = M_w - Z0_w - Z2_w;
+    wire [53:0] p_mag = Z0_w + (Z1_w << 16) + (Z2_w << 32);
+
+    wire [53:0] p_signed = sign_out ? (~p_mag + 1'b1) : p_mag;
+    wire signed [26:0] hi_out = {p_signed[53], p_signed[48:23]};
+
+    always @(posedge clk) begin
+        if (reset) begin
+            current_state <= IDLE;
+        end else begin
+            current_state <= next_state;
+            case (current_state)
+                IDLE: begin
+                    if (in_val && is_high_resolution)
+                        Z2_reg <= fpm_out[21:0];
+                end
+                CALC_0:
+                    Z0_reg <= fpm_out[31:0];
+                CALC_1:
+                    M_reg  <= fpm_out[33:0];
+                default: ;
+            endcase
+        end
+    end
+
+    always @(*) begin
+        next_state = current_state;
+        fpm_in_a   = 18'sd0;
+        fpm_in_b   = 18'sd0;
+        out        = 27'sd0;
+        out_val    = 1'b0;
+        in_rdy     = 1'b0;
+
+        case (current_state)
+            IDLE: begin
+                in_rdy = 1'b1;
+                if (in_val && !is_high_resolution) begin
+                    fpm_in_a = lo_a;
+                    fpm_in_b = lo_b;
+                    out      = {lo_out, 9'b0};
+                    out_val  = 1'b1;
+                end else if (in_val && is_high_resolution) begin
+                    fpm_in_a   = AH_ext;
+                    fpm_in_b   = BH_ext;
+                    next_state = CALC_0;
+                end
+            end
+            CALC_0: begin
+                fpm_in_a   = AL_ext;
+                fpm_in_b   = BL_ext;
+                next_state = CALC_1;
+            end
+            CALC_1: begin
+                fpm_in_a   = SA_ext;
+                fpm_in_b   = SB_ext;
+                next_state = CALC_2;
+            end
+            CALC_2: begin
+                out     = hi_out;
+                out_val = 1'b1;
+                if (out_rdy)
+                    next_state = IDLE;
+            end
+        endcase
     end
 endmodule
 
-//////////////////////////////////////////////////
-//// signed mult of 4.23 format 2'comp////////////
-//////////////////////////////////////////////////
-
-module signed_mult (out, a, b);
-	output 	signed  [26:0]	out;
-	input 	signed	[26:0] 	a;
-	input 	signed	[26:0] 	b;
-	// intermediate full bit length
-	wire 	signed	[53:0]	mult_out;
-	assign mult_out = a * b;
-	// select bits for 4.23 fixed point
-	assign out = {mult_out[53], mult_out[48:23]};
-endmodule
-//////////////////////////////////////////////////
-
-`define ITER_MAX 1000
-
-module iterator #(
- iter_max=1000
-)
-(
-	input reset,
-	input clk,
-	input in_val,
-	output reg in_rdy,
-
-	input signed  [26:0] in_c_r,
-	input signed  [26:0] in_c_i,
-
-	output reg signed [$clog2(`ITER_MAX):0] iter_count,
-	output escape_condition,
-	output reg out_val,
-	input out_rdy
-);
-	
-	localparam [1:0] IDLE = 2'b00,
-	                 CALC = 2'b01,
-	                 DONE = 2'b10;
-
-	reg  [1:0] current_state;
-//	reg  [1:0] current_mult_state;
-	
-//	reg  [1:0] next_mult_state;
-	reg  [1:0] next_state;
-
-	reg signed [26:0] zi, zr, zr_sq, zi_sq, c_r, c_i;
-	//wire escape_condition;
-	wire signed [26:0] zr_next, zi_next, z_mag_sq, zr_sq_next, zi_sq_next, zr_zi, zi_shifted;
-
-	always @(posedge clk) begin
-		case (current_state)
-			IDLE: begin
-				if (in_val) begin
-					c_r <= in_c_r;
-					c_i <= in_c_i;
-					zi <= 27'sd0;
-					zr <= 27'sd0;
-					zr_sq <= 27'sd0;
-					zi_sq <= 27'sd0;
-					iter_count <= 0;
-				end
-			end
-			CALC: begin
-				zi <= zi_next;
-				zr <= zr_next;
-				zr_sq <= zr_sq_next;
-				zi_sq <= zi_sq_next;
-				iter_count <= iter_count + 1;
-			end
-			DONE: begin
-				// Stay in DONE until reset
-			end
-		endcase
-		if (reset) begin
-			current_state <= IDLE;
-		end
-		else
-		current_state <= next_state;
-		
-	end	
-
-	always @(*) begin
-		// Default assignments to prevent inferred latches
-		next_state = current_state;
-		in_rdy = 1'b0;
-		out_val = 1'b0;
-
-		case (current_state)
-			IDLE: begin
-				in_rdy = 1'b1;
-				if (in_val) begin
-					next_state = CALC;
-				end
-			end
-			CALC: begin
-				if (escape_condition) begin
-					next_state = DONE;
-				end
-			end
-			DONE: begin
-				out_val = 1'b1;
-				if (out_rdy) begin
-					next_state = IDLE;
-				end
-			end
-			default: begin
-				next_state = IDLE;
-				in_rdy = 1'b1;
-			end
-		endcase
-	end
-
-
-	
-    assign escape_condition = (z_mag_sq > $signed(27'h2000000))
-                            || z_mag_sq[26]
-                            || (iter_count == `ITER_MAX - 1)
-                            || (zr > $signed(27'h1000000))
-                            || (zr < $signed(-27'h1000000))
-                            || (zi > $signed(27'h1000000))
-                            || (zi < $signed(-27'h1000000));
-		 
-	signed_mult mult_zr_zr(zr_sq_next, zr, zr);
-	signed_mult mult_zi_zi(zi_sq_next, zi, zi);
-	signed_mult mult_zr_zi(zr_zi, zr, zi);
-
-	assign zr_next = zr_sq_next - zi_sq_next + c_r;
-	assign zi_shifted = (zr_zi <<< 1);
-	assign zi_next = zi_shifted + c_i;
-
-	assign z_mag_sq = zr_sq_next + zi_sq_next;
-endmodule
-
-
-//
-// FSM iterator uses only 1 DSP
-//
+// FSM Mandelbrot iterator — uses one karatsuba_multiplier (one 18x18 DSP)
 module fsm_iterator (
     input reset,
     input clk,
     input in_val,
     output reg in_rdy,
+    input is_high_resolution,
 
-	input signed  [26:0] in_c_r,
-	input signed  [26:0] in_c_i,
-	 input [9:0] iter_max,
+    input signed [26:0] in_c_r,
+    input signed [26:0] in_c_i,
+    input [9:0] iter_max,
     output reg [9:0] iter_count,
     output escape_condition,
     output reg out_val,
     input out_rdy
 );
-    // state machine encoding 
     localparam [2:0] IDLE   = 3'b000,
                      CALC_1 = 3'b001,
                      CALC_2 = 3'b010,
                      CALC_3 = 3'b011,
                      DONE   = 3'b100;
-                     
-    reg [2:0] current_state = IDLE;
+
+    reg [2:0] current_state;
     reg [2:0] next_state;
 
-    // internal registers for iterative calculations
     reg signed [26:0] zi, zr, c_r, c_i;
     reg signed [26:0] zr_sq_reg, zi_sq_reg;
     wire signed [26:0] zr_next, zi_next, z_mag_sq;
 
+    reg  signed [26:0] kara_a, kara_b;
+    wire signed [26:0] kara_out;
+    reg  kara_in_val, kara_out_rdy;
+    wire kara_out_val, kara_in_rdy;
 
-   // instantiate ONE multiplier 
-    reg  signed [26:0] mult_in_a, mult_in_b;
-    wire signed [26:0] mult_out;
-
-    signed_mult single_mult(mult_out, mult_in_a, mult_in_b);
+    karatsuba_multiplier mult (
+        .clk(clk), .reset(reset),
+        .is_high_resolution(is_high_resolution),
+        .a(kara_a), .b(kara_b), .out(kara_out),
+        .in_val(kara_in_val), .out_rdy(kara_out_rdy),
+        .out_val(kara_out_val), .in_rdy(kara_in_rdy)
+    );
 
     always @(posedge clk) begin
-        case (current_state)
-            IDLE: begin
-                if (in_val) begin
-                    c_r <= in_c_r;
-                    c_i <= in_c_i;
-                    zi <= 27'sd0;
-                    zr <= 27'sd0;
-                    zr_sq_reg <= 27'sd0;
-                    zi_sq_reg <= 27'sd0;
-                    iter_count <= 0;
-                end
-            end
-            CALC_1: begin
-                zr_sq_reg <= mult_out;
-            end
-            CALC_2: begin
-                zi_sq_reg <= mult_out;
-            end
-            CALC_3: begin
-                zi <= zi_next;
-                zr <= zr_next;
-                iter_count <= iter_count + 1;
-            end
-            DONE: begin
-                // do nothing
-            end
-        endcase
-
-        // update state
         if (reset) begin
             current_state <= IDLE;
         end else begin
             current_state <= next_state;
+            case (current_state)
+                IDLE: begin
+                    if (in_val) begin
+                        c_r <= in_c_r;
+                        c_i <= in_c_i;
+                        zi <= 27'sd0;
+                        zr <= 27'sd0;
+                        zr_sq_reg <= 27'sd0;
+                        zi_sq_reg <= 27'sd0;
+                        iter_count <= 0;
+                    end
+                end
+                CALC_1: begin
+                    if (kara_out_val)
+                        zr_sq_reg <= kara_out;
+                end
+                CALC_2: begin
+                    if (kara_out_val)
+                        zi_sq_reg <= kara_out;
+                end
+                CALC_3: begin
+                    if (kara_out_val) begin
+                        zi <= zi_next;
+                        zr <= zr_next;
+                        iter_count <= iter_count + 1;
+                    end
+                end
+                default: ;
+            endcase
         end
     end
 
-    // next state and output logic
     always @(*) begin
         next_state = current_state;
         in_rdy = 1'b0;
@@ -1127,57 +1157,61 @@ module fsm_iterator (
         case (current_state)
             IDLE: begin
                 in_rdy = 1'b1;
-                if (in_val) begin
+                if (in_val)
                     next_state = CALC_1;
-                end
             end
             CALC_1: begin
-                next_state = CALC_2;
+                if (kara_out_val)
+                    next_state = CALC_2;
             end
             CALC_2: begin
-                next_state = CALC_3;
+                if (kara_out_val)
+                    next_state = CALC_3;
             end
             CALC_3: begin
-                if (escape_condition) begin
-                    next_state = DONE;
-                end else begin
-                    next_state = CALC_1;
+                if (kara_out_val) begin
+                    if (escape_condition)
+                        next_state = DONE;
+                    else
+                        next_state = CALC_1;
                 end
             end
             DONE: begin
                 out_val = 1'b1;
-                if (out_rdy) begin
+                if (out_rdy)
                     next_state = IDLE;
-                end
             end
         endcase
     end
 
-    // multiplier input mux based on state
     always @(*) begin
+        kara_a       = 27'sd0;
+        kara_b       = 27'sd0;
+        kara_in_val  = 1'b0;
+        kara_out_rdy = 1'b0;
+
         case (current_state)
             CALC_1: begin
-                mult_in_a = zr;
-                mult_in_b = zr;
+                kara_a = zr; kara_b = zr;
+                kara_in_val = kara_in_rdy;
+                kara_out_rdy = 1'b1;
             end
             CALC_2: begin
-                mult_in_a = zi;
-                mult_in_b = zi;
+                kara_a = zi; kara_b = zi;
+                kara_in_val = kara_in_rdy;
+                kara_out_rdy = 1'b1;
             end
-            CALC_3, DONE: begin 
-                mult_in_a = zr;
-                mult_in_b = zi;
+            CALC_3: begin
+                kara_a = zr; kara_b = zi;
+                kara_in_val = kara_in_rdy;
+                kara_out_rdy = 1'b1;
             end
-            default: begin
-                mult_in_a = 27'sd0;
-                mult_in_b = 27'sd0;
-            end
+            default: ;
         endcase
     end
 
-    // combinational arithmetic
     assign zr_next = zr_sq_reg - zi_sq_reg + c_r;
-    assign zi_next = (mult_out <<< 1) + c_i;  
+    assign zi_next = (kara_out <<< 1) + c_i;
     assign z_mag_sq = zr_sq_reg + zi_sq_reg;
 
     assign escape_condition = (z_mag_sq > $signed(27'h2000000))
@@ -1189,200 +1223,159 @@ module fsm_iterator (
                             || (zi < $signed(-27'h1000000));
 endmodule
 
-
-
 module mandelbrot_top #(
-	parameter ITERATOR_ID   = 0,
-	parameter NUM_ITERATORS = 1
+    parameter ITERATOR_ID   = 0,
+    parameter NUM_ITERATORS = 1
 ) (
-	input reset,
-	input clk,
-	input signed [26:0] x_start,
-	input signed [26:0] y_start,
-	input signed [26:0] pixel_increment_x,
-	input signed [26:0] pixel_increment_y,
-	input [9:0] iter_max,
+    input reset,
+    input clk,
+    input signed [26:0] x_start,
+    input signed [26:0] y_start,
+    input signed [26:0] pixel_increment_x,
+    input signed [26:0] pixel_increment_y,
+    input [9:0] iter_max,
+    input is_high_resolution,
 
-	output reg done, 
-
-
-	// memory write interface
-	output [7:0] mem_write_data,
-	output reg [18:0] mem_write_address,
-	output reg mem_we
+    output reg done,
+    output [9:0] mem_write_data,
+    output reg [18:0] mem_write_address,
+    output reg mem_we
 );
+    localparam [1:0] CALC = 2'b01,
+                     DONE = 2'b10;
 
-	// Valid states. Done is when iterator has finished all of its pixels in a frame.	
-	localparam [1:0] CALC = 2'b01,
-	                 DONE = 2'b10;
-						  
-	reg [9:0] iter_max_reg;
-						  
-	reg  [1:0] current_state;
-	reg [1:0] next_state;
+    reg [9:0] iter_max_reg;
+    reg       hires_reg;
 
-	reg signed [26:0] curr_x, curr_y;
-	reg [9:0] pixel_x, pixel_y;
+    reg  [1:0] current_state;
+    reg  [1:0] next_state;
 
-	reg [9:0] next_pixel_x, next_pixel_y;
-	reg signed [26:0] next_x, next_y;
+    reg signed [26:0] curr_x, curr_y;
+    reg [9:0] pixel_x, pixel_y;
+    reg [9:0] next_pixel_x, next_pixel_y;
+    reg signed [26:0] next_x, next_y;
 
-//	reg [$clog2(`MEM_MAX+1):0] mem_write_address_next;
+    reg iterator_reset;
+    reg iterator_in_val;
+    wire iterator_in_rdy;
+    wire iterator_out_val;
+    reg iterator_out_rdy;
+    wire [9:0] iterator_iter_count;
+    wire iterator_escape_condition;
 
-	// Iterator signals
-	reg iterator_reset;
-	reg iterator_in_val;
-	wire iterator_in_rdy;
-	wire iterator_escape_condition;
-	wire iterator_out_val;
-	reg iterator_out_rdy;
-	wire [9:0] iterator_iter_count;
-	// Iterator instance
-	fsm_iterator iter1 
-	(
-		.reset(iterator_reset),
-		.clk(clk),
-		.in_val(iterator_in_val),
-		.in_rdy(iterator_in_rdy),
-		.in_c_r(curr_x),
-		.in_c_i(curr_y),
-		.iter_count(iterator_iter_count),
-		.iter_max(iter_max_reg),
-		.escape_condition(iterator_escape_condition),
-		.out_val(iterator_out_val),
-		.out_rdy(iterator_out_rdy)
-	);
+    assign mem_write_data = iterator_iter_count;
 
+    fsm_iterator iter1 (
+        .reset(iterator_reset),
+        .clk(clk),
+        .in_val(iterator_in_val),
+        .in_rdy(iterator_in_rdy),
+        .is_high_resolution(hires_reg),
+        .in_c_r(curr_x),
+        .in_c_i(curr_y),
+        .iter_count(iterator_iter_count),
+        .iter_max(iter_max_reg),
+        .escape_condition(iterator_escape_condition),
+        .out_val(iterator_out_val),
+        .out_rdy(iterator_out_rdy)
+    );
 
+    always @(posedge clk) begin
+        if (reset) begin
+            done <= 1'b0;
+            current_state <= CALC;
+            curr_x <= x_start;
+            curr_y <= y_start;
+            pixel_x <= 0;
+            pixel_y <= 0;
+            iterator_reset <= 1'b1;
+            iter_max_reg <= iter_max;
+            hires_reg <= is_high_resolution;
+            mem_write_address <= 0;
+            mem_we <= 1'b0;
+            iterator_in_val <= 1'b0;
+            iterator_out_rdy <= 1'b0;
+        end else begin
+            iterator_reset <= 1'b0;
+            current_state <= next_state;
+            case (current_state)
+                CALC: begin
+                    if (iterator_in_rdy && !iterator_in_val) begin
+                        iterator_in_val <= 1'b1;
+                        iterator_out_rdy <= 1'b0;
+                        mem_we <= 1'b0;
+                        if (mem_write_address != 0 || pixel_x != 0 || pixel_y != 0)
+                            mem_write_address <= mem_write_address + 1;
+                    end
+                    else if (iterator_in_val) begin
+                        iterator_in_val <= 1'b0;
+                        mem_we <= 1'b0;
+                    end
+                    else if (iterator_out_val) begin
+                        iterator_out_rdy <= 1'b1;
+                        mem_we <= 1'b1;
+                        curr_x <= next_x;
+                        curr_y <= next_y;
+                        pixel_x <= next_pixel_x;
+                        pixel_y <= next_pixel_y;
+                    end
+                    else begin
+                        iterator_in_val <= 1'b0;
+                        iterator_out_rdy <= 1'b1;
+                        mem_we <= 1'b0;
+                    end
+                end
+                DONE: begin
+                    done <= 1'b1;
+                    mem_we <= 1'b0;
+                end
+            endcase
+        end
+    end
 
-	// Color scheme instance
-	wire [7:0] color_reg;
-	assign mem_write_data = color_reg;
-	color_scheme cs1 (
-		.clk(clk),
-		.counter(iterator_iter_count),
-		.color_reg(color_reg)
-	);
+    always @(*) begin
+        if (pixel_x == `X_PIXEL_MAX) begin
+            next_pixel_x = 0;
+            next_pixel_y = pixel_y + 1;
+            next_x = x_start;
+            next_y = curr_y - pixel_increment_y;
+        end else begin
+            next_pixel_x = pixel_x + 1;
+            next_x = curr_x + pixel_increment_x;
+            next_pixel_y = pixel_y;
+            next_y = curr_y;
+        end
+    end
 
-	always @(posedge clk) begin
-		if (reset) begin
-			done <= 1'b0;
-			current_state <= CALC;
-			curr_x <= x_start;
-			curr_y <= y_start;
-			pixel_x <= 0;
-			pixel_y <= 0;
-			
-			iterator_reset <= 1'b1;
-			iter_max_reg <= iter_max;
-			
-			mem_write_address <= 0;
-			mem_we <= 1'b0;
-
-			iterator_in_val <= 1'b0;
-			iterator_out_rdy <= 1'b0;
-		end	else begin
-			// Deassert iterator reset after first cycle out of reset
-			iterator_reset <= 1'b0;
-			current_state <= next_state;
-			case (current_state)
-				CALC: begin
-					if (iterator_in_rdy && !iterator_in_val) begin
-						// Iterator is ready - send it the current coordinate
-						iterator_in_val <= 1'b1;
-						iterator_out_rdy <= 1'b0;
-						mem_we <= 1'b0;
-						// Increment address AFTER writing (previous cycle wrote
-						// with the old address, now advance for next pixel)
-						if (mem_write_address != 0 || pixel_x != 0 || pixel_y != 0)
-							mem_write_address <= mem_write_address + 1;
-					end 
-					else if (iterator_in_val) begin
-						// in_val was asserted for one cycle, deassert it
-						iterator_in_val <= 1'b0;
-						mem_we <= 1'b0;
-					end
-					else if (iterator_out_val) begin
-						// Iterator finished - write result using CURRENT address
-						iterator_out_rdy <= 1'b1;
-						mem_we <= 1'b1;
-						// Advance to next pixel coordinate
-						curr_x <= next_x;
-						curr_y <= next_y;
-						pixel_x <= next_pixel_x;
-						pixel_y <= next_pixel_y;
-					end
-					else begin
-						iterator_in_val <= 1'b0;
-						iterator_out_rdy <= 1'b1;
-						mem_we <= 1'b0;
-					end
-
-				end
-				DONE: begin
-					done <= 1'b1;
-					mem_we <= 1'b0;
-				end
-			endcase
-		end
-		
-	end
-
-
-	
-
-	always @(*) begin
-		if (pixel_x == `X_PIXEL_MAX) begin 
-			next_pixel_x = 0;
-			next_pixel_y = pixel_y + 1; 
-			next_x = x_start;
-			next_y = curr_y - pixel_increment_y;
-		end
-		else begin
-			next_pixel_x = pixel_x + 1; 
-			next_x = curr_x + pixel_increment_x;
-			next_pixel_y = pixel_y;
-			next_y = curr_y;
-		end
-	end
-
-	// Next state logic
-	always @(*) begin
-		next_state = current_state; // default: hold state
-		case (current_state)
-			CALC: begin
-				// Done when the last pixel in the frame has been computed
-				if (iterator_out_val && pixel_x == `X_PIXEL_MAX && pixel_y == `Y_PIXEL_MAX) begin
-					next_state = DONE;
-				end
-			end
-			DONE: begin
-				next_state = DONE;
-			end
-			default: begin
-				next_state = CALC;
-			end
-		endcase
-	end
-
+    always @(*) begin
+        next_state = current_state;
+        case (current_state)
+            CALC: begin
+                if (iterator_out_val && pixel_x == `X_PIXEL_MAX && pixel_y == `Y_PIXEL_MAX)
+                    next_state = DONE;
+            end
+            DONE:    next_state = DONE;
+            default: next_state = CALC;
+        endcase
+    end
 endmodule
 
 module color_scheme #(
-	parameter ITER_MAX = 1000
+    parameter ITER_MAX = `ITER_MAX
 )(
-	input clk,
-	input [9:0] counter,
-	output reg [7:0] color_reg
+    input clk,
+    input [9:0] counter,
+    output reg [7:0] color_reg
 );
-	always @(*) begin
-		if      (counter >= ITER_MAX)      color_reg = 8'b_000_000_00;
-		else if (counter >= ITER_MAX >> 1) color_reg = 8'b_011_001_00;
-		else if (counter >= ITER_MAX >> 2) color_reg = 8'b_011_001_00;
-		else if (counter >= ITER_MAX >> 3) color_reg = 8'b_101_010_01;
-		else if (counter >= ITER_MAX >> 4) color_reg = 8'b_011_001_01;
-		else if (counter >= ITER_MAX >> 5) color_reg = 8'b_001_001_01;
-		else if (counter >= ITER_MAX >> 6) color_reg = 8'b_011_010_10;
-		else if (counter >= ITER_MAX >> 7) color_reg = 8'b_010_100_10;
-		else                               color_reg = 8'b_010_100_10;
-	end
+    always @(*) begin
+        if      (counter >= ITER_MAX)      color_reg = 8'b_000_000_00;
+        else if (counter >= ITER_MAX >> 1) color_reg = 8'b_011_001_00;
+        else if (counter >= ITER_MAX >> 2) color_reg = 8'b_011_001_00;
+        else if (counter >= ITER_MAX >> 3) color_reg = 8'b_101_010_01;
+        else if (counter >= ITER_MAX >> 4) color_reg = 8'b_011_001_01;
+        else if (counter >= ITER_MAX >> 5) color_reg = 8'b_001_001_01;
+        else if (counter >= ITER_MAX >> 6) color_reg = 8'b_011_010_10;
+        else if (counter >= ITER_MAX >> 7) color_reg = 8'b_010_100_10;
+        else                               color_reg = 8'b_010_100_10;
+    end
 endmodule
