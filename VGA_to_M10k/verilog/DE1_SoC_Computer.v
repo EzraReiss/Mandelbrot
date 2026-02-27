@@ -477,7 +477,7 @@ wire signed [26:0] pixel_increment_y;
 // Arithmetic right-shift (>>>) by zoom divides step by 2^zoom.
 // $signed() cast ensures the shift is arithmetic even in a mixed expression.
 assign pixel_increment_y = $signed(`BASE_STEP)                    >>> pio_zoom[4:0];
-assign pixel_increment_x = $signed(`BASE_STEP * `NUM_ITERATORS)   >>> pio_zoom[4:0];
+assign pixel_increment_x = ($signed(`BASE_STEP) >>> pio_zoom[4:0]) * `NUM_ITERATORS;
 
 reg signed [26:0] iterator_offset [`NUM_ITERATORS-1:0];
 

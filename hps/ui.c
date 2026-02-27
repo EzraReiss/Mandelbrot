@@ -21,14 +21,15 @@
 #include <unistd.h>
 
 // PIO port addresses from QSYS
-#define FPGA_AXI_BASE 0xC0000000
-#define FPGA_AXI_SPAN 0x00001000
-#define FPGA_PIO_RESET 0x00000010
-#define FPGA_PIO_ZOOM 0x00000020
-#define FPGA_PIO_PAN_X 0x00000030
-#define FPGA_PIO_PAN_Y 0x00000040
-#define FPGA_PIO_START 0x00000050
-#define FPGA_PIO_FINISH 0x00000060
+#define FPGA_AXI_BASE     0xC0000000
+#define FPGA_AXI_SPAN     0x00001000
+#define FPGA_PIO_RESET    0x00000010
+#define FPGA_PIO_ZOOM     0x00000020
+#define FPGA_PIO_PAN_X    0x00000030
+#define FPGA_PIO_PAN_Y    0x00000040
+#define FPGA_PIO_START    0x00000050
+#define FPGA_PIO_FINISH   0x00000060
+#define FPGA_PIO_ITER_MAX 0x00000070
 
 // View constants — must match Verilog defines
 #define X_PIXELS 640
@@ -44,6 +45,7 @@ volatile signed int *f_pan_x_ptr;
 volatile signed int *f_pan_y_ptr;
 volatile signed int *f_start_ptr;
 volatile signed int *f_finish_ptr;
+volatile signed int *f_iter_max_ptr;
 
 // log start and end times for frame loads
 struct timeval start_time, end_time;
@@ -75,7 +77,8 @@ static inline double step_at_zoom(int zoom) {
 }
 
 // main
-int main(void) {
+int main(void) 
+{
   // === get FPGA addresses ==================
   // Open /dev/mem
   if ((fd = open("/dev/mem", (O_RDWR | O_SYNC))) == -1) {
@@ -92,12 +95,13 @@ int main(void) {
     return (1);
   }
 
-  f_reset_ptr = (unsigned int *)(h2p_virtual_base + FPGA_PIO_RESET);
-  f_zoom_ptr = (unsigned int *)(h2p_virtual_base + FPGA_PIO_ZOOM);
-  f_pan_x_ptr = (signed int *)(h2p_virtual_base + FPGA_PIO_PAN_X);
-  f_pan_y_ptr = (signed int *)(h2p_virtual_base + FPGA_PIO_PAN_Y);
-  f_start_ptr = (signed int *)(h2p_virtual_base + FPGA_PIO_START);
-  f_finish_ptr = (signed int *)(h2p_virtual_base + FPGA_PIO_FINISH);
+  f_reset_ptr =    (unsigned int *)(h2p_virtual_base + FPGA_PIO_RESET);
+  f_zoom_ptr =     (unsigned int *)(h2p_virtual_base + FPGA_PIO_ZOOM);
+  f_pan_x_ptr =    (signed int *)(h2p_virtual_base + FPGA_PIO_PAN_X);
+  f_pan_y_ptr =    (signed int *)(h2p_virtual_base + FPGA_PIO_PAN_Y);
+  f_start_ptr =    (signed int *)(h2p_virtual_base + FPGA_PIO_START);
+  f_finish_ptr =   (signed int *)(h2p_virtual_base + FPGA_PIO_FINISH);
+  f_iter_max_ptr = (signed int *)(h2p_virtual_base + FPGA_PIO_ITER_MAX);
 
   // initialize mutex
   pthread_mutex_init(&state_mutex, NULL);
@@ -118,7 +122,8 @@ int main(void) {
 }
 
 // pthread function to handle mouse input for zoom and pan
-void *mouse_handler(void *arg) {
+void *mouse_handler(void *arg) 
+{
   int fd, bytes, fd_kb, bytes_kb;
   unsigned char data[3];
   const char *pDevice = "/dev/input/mice";
@@ -203,7 +208,8 @@ void *mouse_handler(void *arg) {
 }
 
 // pthread function to write to PIO ports and measure frame load time
-void *fpga_handler(void *arg) {
+void *fpga_handler(void *arg) 
+{
   int local_zoom;
   double local_cx, local_cy;
   bool need_reset;
@@ -259,7 +265,8 @@ void *fpga_handler(void *arg) {
   return NULL;
 }
 
-void* console_reset(void* arg) {
+void* console_reset(void* arg) 
+{
   while(1){
     // read r from console to reset 
     char input[20];
@@ -270,6 +277,23 @@ void* console_reset(void* arg) {
       zoom_level = 0;
       state_dirty = true;
       printf("Reset view to default\n");
+    }
+  }
+}
+
+void* console_set_iter(void* arg) 
+{
+  while(1) {
+    char input[20];
+    fgets(input, 20, stdin);
+    if (input[0] == 'i') {
+      fgets(input, 20, stdin);
+      int iter_max = atoi(input);
+      if (iter_max > 0 && iter_max <= 10000) {
+        *f_iter_max_ptr = iter_max;
+        printf("Set max iterations to %d\n", iter_max);
+      } else {
+        printf("Invalid iteration count. Must be between 1 and 10000.\n");
     }
   }
 }
