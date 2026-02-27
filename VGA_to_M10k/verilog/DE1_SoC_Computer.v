@@ -426,6 +426,15 @@ always @(*) begin
 end
 
 wire [31:0] pio_reset;
+wire pio_sync_reset;
+
+reset_synchronizer synchronizer(
+	.clk(M10k_pll),
+	.async_rst_in(pio_reset[0]),
+	.sync_rst_out(pio_sync_reset)
+);
+
+
 wire [31:0] pio_zoom;
 wire signed [31:0] pio_pan_x;
 wire signed [31:0] pio_pan_y;
@@ -478,6 +487,7 @@ wire signed [26:0] pixel_increment_y;
 // $signed() cast ensures the shift is arithmetic even in a mixed expression.
 assign pixel_increment_y = $signed(`BASE_STEP)                    >>> pio_zoom[4:0];
 assign pixel_increment_x = ($signed(`BASE_STEP) >>> pio_zoom[4:0]) * `NUM_ITERATORS;
+//assign pixel_increment_x = $signed(`BASE_STEP * `NUM_ITERATORS)   >>> pio_zoom[4:0];
 
 reg signed [26:0] iterator_offset [`NUM_ITERATORS-1:0];
 
@@ -497,7 +507,7 @@ generate
 			.ITERATOR_ID(gi),
 			.NUM_ITERATORS(`NUM_ITERATORS)
 		) mandelbrot_unit (
-			.reset(~KEY[0] || pio_reset[0]),
+			.reset(~KEY[0] || pio_sync_reset),
 			.clk(M10k_pll),
 			.x_start(pio_pan_x[26:0] + iterator_offset[gi]),
 			.y_start(pio_pan_y[26:0]),
@@ -854,6 +864,22 @@ endmodule
 //============================================================
 
 
+module reset_synchronizer (
+    input clk,
+    input async_rst_in,
+    output reg sync_rst_out
+);
+
+    reg stage1;
+
+    always @(posedge clk) begin
+        // Shift the asynchronous signal through two flops
+        stage1       <= async_rst_in;
+        sync_rst_out <= stage1;
+    end
+
+endmodule
+
 /*
 AI made this:
 opus modified this M10K module to be able to generate non-powers of 2 sizes
@@ -867,38 +893,15 @@ module M10K_1000_8 #(
     input [18:0] write_address, read_address,
     input we, clk
 );
-    // Each M10K block holds 1024 entries at 8-bit width.
-    // Manually partition into exactly ceil(MEM_DEPTH/1024) sub-blocks
-    // so Quartus uses one M10K per sub-block with no power-of-2 rounding.
-    localparam BLOCK_DEPTH = 1024;
-    localparam NUM_BLOCKS  = (MEM_DEPTH + BLOCK_DEPTH - 1) / BLOCK_DEPTH;
-    localparam SEL_BITS    = (NUM_BLOCKS > 1) ? $clog2(NUM_BLOCKS) : 1;
-
-    wire [9:0]          sub_addr_w   = write_address[9:0];
-    wire [9:0]          sub_addr_r   = read_address[9:0];
-    wire [SEL_BITS-1:0] block_sel_w  = write_address[SEL_BITS+9:10];
-    wire [SEL_BITS-1:0] block_sel_r  = read_address[SEL_BITS+9:10];
-
-    reg [7:0]           sub_q [0:NUM_BLOCKS-1];
-    reg [SEL_BITS-1:0]  block_sel_r_reg;
-
-    always @(posedge clk)
-        block_sel_r_reg <= block_sel_r;
-
-    genvar i;
-    generate
-        for (i = 0; i < NUM_BLOCKS; i = i + 1) begin : blk
-            reg [7:0] mem [0:BLOCK_DEPTH-1] /* synthesis ramstyle = "no_rw_check, M10K" */;
-            always @(posedge clk) begin
-                if (we && block_sel_w == i[SEL_BITS-1:0])
-                    mem[sub_addr_w] <= d;
-                sub_q[i] <= mem[sub_addr_r];
-            end
-        end
-    endgenerate
-
-    always @(*)
-        q = sub_q[block_sel_r_reg];
+	 // force M10K ram style
+    reg [7:0] mem [MEM_DEPTH-1:0]  /* synthesis ramstyle = "no_rw_check, M10K" */;
+	 
+    always @ (posedge clk) begin
+        if (we) begin
+            mem[write_address] <= d;
+		  end
+        q <= mem[read_address]; // q doesn't get d in this clock cycle
+    end
 endmodule
 
 //////////////////////////////////////////////////
@@ -1013,30 +1016,13 @@ module iterator (
 
 
 	
-	assign escape_condition = 
-		 // 1. Magnitude Check ( > 4.0 )
-		 z_mag_sq > $signed(27'h2000000) 
-		 
-		 // 2. MAGNITUDE OVERFLOW CATCHER (If sum of squares wrapped to negative)
-		 || z_mag_sq < $signed(27'h0000000) 
-		 
-		 // 3. Max Iterations
-		 || iter_count == `ITER_MAX - 1
-		 
-		 // 4. Bounding Box +/- 2.0
-//		 || zi_next >  $signed(27'h1000000) 
-//		 || zi_next <  $signed(27'h7000000) 
-//		 || zr_next >  $signed(27'h1000000) 
-//		 || zr_next <  $signed(27'h7000000)
-		 
-		 || zr_next >  $signed(27'h1400000) // +2.5
-		 || zr_next <  $signed(27'h6C00000) // -2.5
-		 || zi_next >  $signed(27'h1400000) // +2.5
-		 || zi_next <  $signed(27'h6C00000) // -2.5
-		 
-		 // 5. Cross-Product Bounds +/- 3.5
-		 || zr_zi >  $signed(27'h1C00000) 
-		 || zr_zi <  $signed(27'h6400000);
+    assign escape_condition = (z_mag_sq > $signed(27'h2000000))
+                            || z_mag_sq[26]
+                            || (iter_count == `ITER_MAX - 1)
+                            || (zr > $signed(27'h1000000))
+                            || (zr < $signed(-27'h1000000))
+                            || (zi > $signed(27'h1000000))
+                            || (zi < $signed(-27'h1000000));
 		 
 	signed_mult mult_zr_zr(zr_sq_next, zr, zr);
 	signed_mult mult_zi_zi(zi_sq_next, zi, zi);
@@ -1188,14 +1174,16 @@ module fsm_iterator (
     assign zi_next = (mult_out <<< 1) + c_i;  
     assign z_mag_sq = zr_sq_reg + zi_sq_reg;
 
-    assign escape_condition = (z_mag_sq > $signed(27'h2000000)) 
+    assign escape_condition = (z_mag_sq > $signed(27'h2000000))
+                            || z_mag_sq[26]
                             || (iter_count == `ITER_MAX - 1)
-                            || (zi_next > $signed(27'h1000000)) 
-                            || (zi_next < $signed(-27'h1000000)) 
-                            || (zr_next > $signed(27'h1000000)) 
-                            || (zr_next < $signed(-27'h1000000));
-
+                            || (zr > $signed(27'h1000000))
+                            || (zr < $signed(-27'h1000000))
+                            || (zi > $signed(27'h1000000))
+                            || (zi < $signed(-27'h1000000));
 endmodule
+
+
 
 module mandelbrot_top #(
 	parameter ITERATOR_ID   = 0,
