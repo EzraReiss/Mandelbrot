@@ -514,7 +514,7 @@ generate
 			.y_start(pio_pan_y[26:0]),
 			.pixel_increment_x(pixel_increment_x),
 			.pixel_increment_y(pixel_increment_y),
-			.iter_max(pio_iter_max),
+			.iter_max(pio_iter_max[9:0]),
 
 			.done(iter_done[gi]), 
 			.mem_write_data(iter_write_data[gi]),
@@ -1051,10 +1051,10 @@ module fsm_iterator (
     input in_val,
     output reg in_rdy,
 
-    input signed  [26:0] in_c_r,
-    input signed  [26:0] in_c_i,
-	 input [31:0] iter_max,
-    output reg signed [31:0] iter_count,
+	input signed  [26:0] in_c_r,
+	input signed  [26:0] in_c_i,
+	 input [9:0] iter_max,
+    output reg [9:0] iter_count,
     output escape_condition,
     output reg out_val,
     input out_rdy
@@ -1201,7 +1201,7 @@ module mandelbrot_top #(
 	input signed [26:0] y_start,
 	input signed [26:0] pixel_increment_x,
 	input signed [26:0] pixel_increment_y,
-	input [31:0] iter_max,
+	input [9:0] iter_max,
 
 	output reg done, 
 
@@ -1216,7 +1216,7 @@ module mandelbrot_top #(
 	localparam [1:0] CALC = 2'b01,
 	                 DONE = 2'b10;
 						  
-	reg [31:0] iter_max_reg;
+	reg [9:0] iter_max_reg;
 						  
 	reg  [1:0] current_state;
 	reg [1:0] next_state;
@@ -1236,7 +1236,7 @@ module mandelbrot_top #(
 	wire iterator_escape_condition;
 	wire iterator_out_val;
 	reg iterator_out_rdy;
-	wire [31:0] iterator_iter_count;
+	wire [9:0] iterator_iter_count;
 	// Iterator instance
 	fsm_iterator iter1 
 	(
@@ -1261,7 +1261,6 @@ module mandelbrot_top #(
 	color_scheme cs1 (
 		.clk(clk),
 		.counter(iterator_iter_count),
-		.iter_max(iter_max_reg),
 		.color_reg(color_reg)
 	);
 
@@ -1368,53 +1367,22 @@ module mandelbrot_top #(
 
 endmodule
 
-module color_scheme (
+module color_scheme #(
+	parameter ITER_MAX = 1000
+)(
 	input clk,
-	input [31:0] counter, //iterator_iter_count 
-	input [31:0] iter_max,
+	input [9:0] counter,
 	output reg [7:0] color_reg
-
 );
 	always @(*) begin
-		if (counter >= iter_max) begin
-		color_reg = 8'b_000_000_00 ; // black
-		color_reg = 8'b_000_000_00 ; // black
-		end
-		else if (counter >= (iter_max >>> 1)) begin
-		color_reg = 8'b_011_001_00 ; // white
-		color_reg = 8'b_011_001_00 ; // white
-		end
-		else if (counter >= (iter_max >>> 2)) begin
-		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
-		color_reg = 8'b_011_001_00 ; //idk how this is diff than white lol
-		end
-		else if (counter >= (iter_max >>> 3)) begin
-		color_reg = 8'b_101_010_01 ;
-		color_reg = 8'b_101_010_01 ;
-		end
-		else if (counter >= (iter_max >>> 4)) begin
-		color_reg = 8'b_011_001_01 ;
-		color_reg = 8'b_011_001_01 ;
-		end
-		else if (counter >= (iter_max >>> 5)) begin
-		color_reg = 8'b_001_001_01 ;
-		color_reg = 8'b_001_001_01 ;
-		end
-		else if (counter >= (iter_max >>> 6)) begin
-		color_reg = 8'b_011_010_10 ;
-		color_reg = 8'b_011_010_10 ;
-		end
-		else if (counter >= (iter_max >>> 7)) begin
-		color_reg = 8'b_010_100_10 ;
-		color_reg = 8'b_010_100_10 ;
-		end
-		else if (counter >= (iter_max >>> 8)) begin
-		color_reg = 8'b_010_100_10 ;
-		color_reg = 8'b_010_100_10 ;
-		end
-		else begin
-		color_reg = 8'b_010_100_10 ;
-		color_reg = 8'b_010_100_10 ;
-		end
+		if      (counter >= ITER_MAX)      color_reg = 8'b_000_000_00;
+		else if (counter >= ITER_MAX >> 1) color_reg = 8'b_011_001_00;
+		else if (counter >= ITER_MAX >> 2) color_reg = 8'b_011_001_00;
+		else if (counter >= ITER_MAX >> 3) color_reg = 8'b_101_010_01;
+		else if (counter >= ITER_MAX >> 4) color_reg = 8'b_011_001_01;
+		else if (counter >= ITER_MAX >> 5) color_reg = 8'b_001_001_01;
+		else if (counter >= ITER_MAX >> 6) color_reg = 8'b_011_010_10;
+		else if (counter >= ITER_MAX >> 7) color_reg = 8'b_010_100_10;
+		else                               color_reg = 8'b_010_100_10;
 	end
 endmodule
