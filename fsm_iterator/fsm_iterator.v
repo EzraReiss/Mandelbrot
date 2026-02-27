@@ -181,201 +181,138 @@ module full_precision_mult_18_bit (
 endmodule
 
 
+// Variable-precision multiplier using one 18x18 DSP block.
+// Low-res (is_high_resolution=0): combinational Q4.14 multiply, 0 extra cycles.
+// High-res (is_high_resolution=1): Karatsuba Q4.23 multiply, 3 extra cycles.
+// Caller must hold a, b, is_high_resolution stable while in_rdy is low.
 module karatsuba_multiplier (
     input clk,
-    input reset, 
-    
-    //Is it 18 bit multiply or 27 bit multiply?
+    input reset,
     input is_high_resolution,
-    
 
-    //assume on the caller side a and b are wires from a register
     input signed [26:0] a,
     input signed [26:0] b,
     output reg signed [26:0] out,
 
     input in_val,
+    input out_rdy,
     output reg out_val,
-    output reg in_rdy,
+    output reg in_rdy
 );
 
+    localparam [1:0] IDLE   = 2'b00,
+                     CALC_0 = 2'b01,
+                     CALC_1 = 2'b10,
+                     CALC_2 = 2'b11;
 
-    //input registers
-    reg is_high_resolution_reg;
+    reg [1:0] current_state;
+    reg [1:0] next_state;
 
-
-    localparam [2:0] state_idle = 3'b000,
-                    state_high_pres_calc_0 = 3'b010,
-                    state_high_pres_calc_1 = 3'b011,
-                    state_high_pres_calc_2 = 3'b100;
-
-
-    reg [2:0] current_state = state_idle;
-    reg [2:0] next_state;
-
-    wire signed [17:0] low_res_mult_in_a, low_res_mult_in_b;
-    wire signed [17:0] low_res_mult_out;
-
-    reg signed [17:0] fpm_in_a, fpm_in_b;
+    // Single 18x18 signed multiplier (maps to one DSP block)
+    reg  signed [17:0] fpm_in_a, fpm_in_b;
     wire signed [35:0] fpm_out;
+    full_precision_mult_18_bit fpm(fpm_out, fpm_in_a, fpm_in_b);
 
-    full_precision_mult_18_bit full_precision_mult(fpm_out, fpm_in_a, fpm_in_b);
+    // ---- Low-res path: truncate Q4.23 → Q4.14, multiply, widen back ----
+    wire signed [17:0] lo_a = a[26:9];
+    wire signed [17:0] lo_b = b[26:9];
+    wire signed [17:0] lo_out = {fpm_out[35], fpm_out[30:14]};
 
-    assign low_res_mult_in_a = a[17:0];
-    assign low_res_mult_in_b = b[17:0];
-    assign low_res_mult_out = {8'b0, fpm_out[35], fpm_out[30:14]};
-    //karatsuba multiplication initialization registers
-    wire sign_a;
-    wire sign_b;
-    wire sign_out;
+    // ---- Karatsuba: sign handling ----
+    wire sign_out = a[26] ^ b[26];
+    wire [26:0] abs_a = a[26] ? (~a + 1) : a;
+    wire [26:0] abs_b = b[26] ? (~b + 1) : b;
 
-    assign sign_a = a[26];
-    assign sign_b = b[26];
-    assign sign_out = sign_a ^ sign_b;
+    // Split at bit 16 so that SA/SB never overflow bit 17 of signed 18-bit input.
+    // k=16: AL is 16-bit, AH is 11-bit. SA max = 65535+2047 = 67582 < 2^17. Safe.
+    wire [15:0] AL = abs_a[15:0];
+    wire [10:0] AH = abs_a[26:16];
+    wire [15:0] BL = abs_b[15:0];
+    wire [10:0] BH = abs_b[26:16];
 
-    wire [26:0] abs_a;
-    wire [26:0] abs_b;
+    wire [17:0] AL_ext = {2'b0, AL};
+    wire [17:0] AH_ext = {7'b0, AH};
+    wire [17:0] BL_ext = {2'b0, BL};
+    wire [17:0] BH_ext = {7'b0, BH};
+    wire [17:0] SA_ext = {2'b0, AL} + {7'b0, AH};
+    wire [17:0] SB_ext = {2'b0, BL} + {7'b0, BH};
 
-    assign abs_a = sign_a ? (~a + 1) : a;
-    assign abs_b = sign_b ? (~b + 1) : b;
+    // ---- Registered partial products ----
+    reg [35:0] Z2_reg;  // AH * BH
+    reg [35:0] Z0_reg;  // AL * BL
+    reg [35:0] M_reg;   // (AL+AH) * (BL+BH)
 
-    wire [16:0] AL;
-    wire [9:0] AH;
-    wire [16:0] BL;
-    wire [9:0] BH;
+    // ---- Karatsuba reconstruction in 54-bit unsigned space ----
+    // result = Z0 + Z1*2^16 + Z2*2^32,  where Z1 = M - Z0 - Z2
+    wire [53:0] Z0_w = {18'b0, Z0_reg};
+    wire [53:0] Z2_w = {18'b0, Z2_reg};
+    wire [53:0] M_w  = {18'b0, M_reg};
+    wire [53:0] Z1_w = M_w - Z0_w - Z2_w;
+    wire [53:0] p_mag = Z0_w + (Z1_w << 16) + (Z2_w << 32);
 
-    assign AL = abs_a[16:0];
-    assign AH = abs_a[26:17];
-    assign BL = abs_b[16:0];
-    assign BH = abs_b[26:17];
+    // Negate full product BEFORE truncation to match 2's complement rounding
+    wire [53:0] p_signed = sign_out ? (~p_mag + 1'b1) : p_mag;
+    wire signed [26:0] hi_out = {p_signed[53], p_signed[48:23]};
 
-    wire [17:0] AL_extended, AH_extended, BL_extended, BH_extended;
-    assign AH_extended = {8'b0, AH};
-    assign BH_extended = {8'b0, BH};
-
-    assign AL_extended = {1'b0, AL};
-    assign BL_extended = {1'b0, BL};
-
-
-    wire [17:0] SA, SB;
-    assign SA = AL + AH;
-    assign SB = BL + BH;
-
-    reg [35:0] Z0, Z2, M;
-    reg [35:0] Z0_reg, Z2_reg, M_reg;
-
-    wire [35:0] Z2_shifted;
-    assign Z2_shifted = Z2_reg << 34;
-
-    wire [37:0] Z1;
-    assign Z1 = M_reg - Z0_reg - Z2_reg;
-
-    wire [37:0] Z1_shifted;
-    assign Z1_shifted = Z1 << 17;
-
-    wire [63:0] p_mag;
-    assign p_mag = Z0_reg + Z1_shifted + Z2_shifted;
-
-    // p_mag is in unsigned Q8.46 format (54 bits)
-    // Extract 3 integer + 23 fractional bits = magnitude
-    wire [25:0] magnitude = p_mag[48:23];
-    
-    // Re-apply sign for Q4.23 output
-    wire [26:0] signed_result = sign_out ? (~{1'b0, magnitude} + 1) : {1'b0, magnitude};
-
-    //Mealy state machine
+    // ---- Registered block: state update + capture multiply results ----
     always @(posedge clk) begin
         if (reset) begin
-            
+            current_state <= IDLE;
         end else begin
-            case (current_state) 
-                state_idle: begin
-                    if (in_val && !is_high_resolution) begin
-                        Z0_reg = Z0;
-                    end
+            current_state <= next_state;
+            case (current_state)
+                IDLE: begin
+                    if (in_val && is_high_resolution)
+                        Z2_reg <= fpm_out;
                 end
-
-                state_high_pres_calc_0: begin
-                    Z2_reg = Z2;
-                end
-
-                state_high_pres_calc_1: begin
-                    M_reg = M;
-                end
-
-                state_high_pres_calc_2: begin
-                    //prob don't need this yet might for clock speed issues
-                end
+                CALC_0:
+                    Z0_reg <= fpm_out;
+                CALC_1:
+                    M_reg  <= fpm_out;
+                default: ;
             endcase
         end
     end
 
-
-    //Mealy outputs as a function of state
+    // ---- Combinational block: next state, mux, handshake, output ----
     always @(*) begin
-        if (reset) begin
+        next_state = current_state;
+        fpm_in_a   = 18'sd0;
+        fpm_in_b   = 18'sd0;
+        out        = 27'sd0;
+        out_val    = 1'b0;
+        in_rdy     = 1'b0;
 
-        end else begin
-            fpm_in_a = 0;
-            fpm_in_b = 0;
-            out = 0;
-            next_state = state_idle;
-            in_rdy = 1'b0;
-            out_val = 1'b0;
-            case (current_state)
-                state_idle: begin
-                    if (in_val && !is_high_resolution) begin
-                        out_val = 1'b1;
-                        in_rdy = 1'b1;
-                        fpm_in_a = low_res_mult_in_a;
-                        fpm_in_b = low_res_mult_in_b;
-                        out = low_res_mult_out;
-                        next_state = state_idle;
-                    end else if (in_val && is_high_resolution) begin
-                        out_val = 1'b0;
-                        in_rdy = 1'b0;
-                        out = 27'sd0; //default output since we don't have a valid output
-                        fpm_in_a = AH_extended;
-                        fpm_in_b = BH_extended;
-                        Z0 = fpm_out;
-                        next_state = state_high_pres_calc_0;
-                    end else begin
-                        out_val = 1'b0;
-                        in_rdy = 1'b1;
-                        out = 27'sd0; //default output since we don't have a valid output
-                        next_state = state_idle;
-                    end
+        case (current_state)
+            IDLE: begin
+                in_rdy = 1'b1;
+                if (in_val && !is_high_resolution) begin
+                    fpm_in_a = lo_a;
+                    fpm_in_b = lo_b;
+                    out      = {lo_out, 9'b0};
+                    out_val  = 1'b1;
+                end else if (in_val && is_high_resolution) begin
+                    fpm_in_a   = AH_ext;
+                    fpm_in_b   = BH_ext;
+                    next_state = CALC_0;
                 end
-                state_high_pres_calc_0: begin
-                    out_val = 1'b0;
-                    in_rdy = 1'b0;
-                    out = 27'sd0; //default output since we don't have a valid output
-                    fpm_in_a = AL_extended;
-                    fpm_in_b = BL_extended;
-                    Z2 = fpm_out;
-                    next_state = state_high_pres_calc_1;
-                end
-                state_high_pres_calc_1: begin
-                    out_val = 1'b0;
-                    in_rdy = 1'b0;
-                    out = 27'sd0;
-                    fpm_in_a = SA;
-                    fpm_in_b = SB;
-                    Z1 = fpm_out;
-                    next_state = state_high_pres_calc_2; 
-                end
-                state_high_pres_calc_2: begin
-                    out_val = 1'b1;
-                    in_rdy = 1'b1;
-                    fpm_in_a = SA;
-                    fpm_in_b = SB;
-                    M = fpm_out;
-                    Z1 = M - Z0 - Z2;
-                    out = 27'sd0; //need to update this
-
-                    next_state = state_idle;
-                end
-            endcase
-        end
+            end
+            CALC_0: begin
+                fpm_in_a   = AL_ext;
+                fpm_in_b   = BL_ext;
+                next_state = CALC_1;
+            end
+            CALC_1: begin
+                fpm_in_a   = SA_ext;
+                fpm_in_b   = SB_ext;
+                next_state = CALC_2;
+            end
+            CALC_2: begin
+                out     = hi_out;
+                out_val = 1'b1;
+                if (out_rdy)
+                    next_state = IDLE;
+            end
+        endcase
     end
 endmodule
