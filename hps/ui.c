@@ -286,7 +286,7 @@ void* console_reset(void* arg)
     } else if (input[0] == 'i') {
       printf("Enter max iterations (current %d): ", iter_max);
       fgets(input, 20, stdin);
-      int iter_max = atoi(input);
+      iter_max = atoi(input);
       if (iter_max > 0 && iter_max <= 10000) {
         *f_iter_max_ptr = iter_max;
         printf("Set max iterations to %d\n", iter_max);
