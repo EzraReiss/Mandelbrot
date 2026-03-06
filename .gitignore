@@ -9,3 +9,5 @@
 !**/*.ppm
 !**/*.md
 !**/*.zip
+!logs/cursor-agent-transcripts/*
+16_iter_mandelbrot/*

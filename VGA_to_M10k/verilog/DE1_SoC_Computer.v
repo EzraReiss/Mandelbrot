@@ -1,4 +1,4 @@
-`define NUM_ITERATORS 160
+`define NUM_ITERATORS 64
 `define COLS_PER_BANK ((640 + `NUM_ITERATORS - 1) / `NUM_ITERATORS) // ceil(640/N)
 `define X_PIXEL_MAX (`COLS_PER_BANK - 1)
 `define Y_PIXEL_MAX (480 - 1)
