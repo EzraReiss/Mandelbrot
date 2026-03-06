@@ -1,3 +1,23 @@
+// -------------------------------------------------------------------------
+// Top-level compile-time macros
+//
+// `NUM_ITERATORS` defines how many parallel Mandelbrot iterator
+// engines are instantiated in the design. Each iterator is responsible
+// for computing every Nth column of pixels (interleaved columns), where
+// N == `NUM_ITERATORS`.
+//
+// Memory layout notes:
+// - The screen width is 640 pixels. To partition columns evenly across
+//   iterator banks we compute `COLS_PER_BANK` = ceil(640 / N). Each
+//   iterator has an M10K (or set of BRAM blocks) large enough to hold
+//   `COLS_PER_BANK * 480` entries (one per pixel row) for its assigned
+//   columns.
+//
+// Fixed-point / iteration constants:
+// - `BASE_STEP` is the base fixed-point step used for pixel arithmetic
+//   (4.23 format). It is shifted by zoom to compute increments per
+//   pixel. `ITER_MAX` is the upper bound used by the colorizer and
+//   iterator termination logic.
 `define NUM_ITERATORS 160
 `define COLS_PER_BANK ((640 + `NUM_ITERATORS - 1) / `NUM_ITERATORS) // ceil(640/N)
 `define X_PIXEL_MAX (`COLS_PER_BANK - 1)
@@ -392,16 +412,39 @@ wire 					M10k_pll_locked ;
 wire 		[9:0]	next_x ;
 wire 		[9:0] 	next_y ;
 
-// Per-iterator write signals — stores 10-bit iter_count (color computed on VGA read side)
+// Per-iterator write signals
+// ---------------------------------------------------------------
+// Each iterator (there are `NUM_ITERATORS` of them) computes an
+// iteration count for a pixel and writes that 10-bit value into
+// its private M10K memory. Because iterators run in parallel we
+// expose arrays of write ports indexed by iterator id:
+//  - `iter_write_data[i]` : 10-bit data to write (iteration count)
+//  - `iter_write_addr[i]` : write address within that iterator's bank
+//  - `iter_we[i]`         : write-enable for that iterator's memory
+//  - `iter_done[i]`       : per-iterator complete flag
+//
+// These memories are read by the VGA read path (see below). The
+// design stores one 10-bit entry per pixel in the bank assigned to
+// the iterator, and later the VGA read stage converts that count to
+// a color byte.
 wire [9:0]  iter_write_data  [`NUM_ITERATORS-1:0];
 wire [18:0] iter_write_addr  [`NUM_ITERATORS-1:0];
 wire        iter_we          [`NUM_ITERATORS-1:0];
 wire        iter_done        [`NUM_ITERATORS-1:0];
 
 // Per-bank M10K read outputs (10-bit iter_count)
+// Each M10K instance returns the stored iter_count for the address
+// requested by the VGA read path. The array `bank_q` is indexed by
+// iterator id and contains the 10-bit values read from each bank.
 wire [9:0]  bank_q           [`NUM_ITERATORS-1:0];
 
 // VGA read: select bank and convert iter_count → color on the read side (one shared instance)
+// The VGA read side determines which iterator's memory contains the
+// pixel for the current `next_x,next_y` coordinates. Because columns
+// were interleaved across iterators (iterator 0 -> cols 0,N,2N...,
+// iterator 1 -> cols 1,N+1,...), the bank index to read from is the
+// x coordinate modulo `NUM_ITERATORS`. We select the appropriate
+// bank read output here and then pass the iter_count to the colorizer.
 wire [9:0] raw_iter_count;
 assign raw_iter_count = bank_q[next_x % `NUM_ITERATORS];
 
@@ -412,6 +455,17 @@ color_scheme vga_colorizer (
 	.color_reg(M10k_out)
 );
 
+// Memory read address calculation for each bank
+// ---------------------------------------------------------------
+// Each bank stores only the subset of columns that iterator handles.
+// To convert the absolute pixel coordinates to a per-bank address we:
+//  - divide `next_x` by `NUM_ITERATORS` to get the column index within
+//    the iterator's assigned columns (integer division)
+//  - multiply `next_y` (row) by `COLS_PER_BANK` to jump to the row's
+//    block within memory and add the per-column offset.
+// The resulting `bank_read_addr` is used as the read address for every
+// M10K instance (they all receive the same read_address and each
+// returns its own `bank_q[i]`).
 wire [18:0] bank_read_addr;
 assign bank_read_addr = (next_x / `NUM_ITERATORS) + `COLS_PER_BANK * next_y;
 
@@ -465,7 +519,18 @@ end
 
 
 
-// Instantiate VGA driver					
+
+// VGA driver instantiation and behaviour
+// ---------------------------------------------------------------
+// `vga_driver` runs in the VGA clock domain and issues the
+// `next_x`/`next_y` coordinates for the pixel that will be
+// displayed on the next cycle. These coordinates are used to form
+// the memory read address (see `bank_read_addr`), which is applied
+// simultaneously to all per-iterator M10K blocks. Each M10K returns
+// its own `bank_q[i]` and we select the appropriate one based on
+// `next_x % NUM_ITERATORS`. The selected 10-bit iteration count is
+// converted to an 8-bit color by `color_scheme` and then consumed
+// by `vga_driver` as `color_in` to drive the RGB outputs.
 vga_driver DUT   (	.clock(vga_pll), 
 							.reset(vga_reset),
 							.color_in(M10k_out),	// Pixel color (8-bit) from selected memory bank
@@ -512,6 +577,17 @@ always @(posedge M10k_pll) begin
 	end
 end
 
+// Per-iterator instantiation and memory wiring
+// ---------------------------------------------------------------
+// This generate block instantiates `NUM_ITERATORS` copies of the
+// `mandelbrot_top` iterator. Each iterator computes the iteration
+// counts for its assigned interleaved columns and writes results
+// into a dedicated M10K block. The M10K instance associated with
+// iterator `gi` exposes a read port that the VGA read path samples
+// (using `bank_read_addr`); during writes the iterator drives its
+// write ports (`iter_write_data[gi]`, `iter_write_addr[gi]`,
+// `iter_we[gi]`). The `iter_done[gi]` signal indicates completion
+// of that iterator's current frame.
 genvar gi;
 generate 
 	for (gi = 0; gi < `NUM_ITERATORS; gi = gi + 1) begin : gen_iter	
@@ -930,9 +1006,16 @@ module M10K_1000_8 #(
         for (i = 0; i < NUM_BLOCKS; i = i + 1) begin : blk
             reg [DATA_WIDTH-1:0] mem [0:BLOCK_DEPTH-1] /* synthesis ramstyle = "no_rw_check, M10K" */;
             always @(posedge clk) begin
-                if (we && block_sel_w == i[SEL_BITS-1:0])
-                    mem[sub_addr_w] <= d;
-                sub_q[i] <= mem[sub_addr_r];
+				// Write port: only update the selected block when `we`
+				// is asserted and the write address high bits choose this
+				// block. `sub_addr_w` is the low offset inside the block.
+				if (we && block_sel_w == i[SEL_BITS-1:0])
+					mem[sub_addr_w] <= d;
+
+				// Synchronous read: sample memory at `sub_addr_r` and
+				// store into `sub_q[i]` so the selected block can be
+				// multiplexed out combinationally from `sub_q`.
+				sub_q[i] <= mem[sub_addr_r];
             end
         end
     endgenerate
@@ -1015,15 +1098,31 @@ module karatsuba_multiplier (
         end else begin
             current_state <= next_state;
             case (current_state)
-                IDLE: begin
-                    if (in_val && is_high_resolution)
-                        Z2_reg <= fpm_out[21:0];
-                end
-                CALC_0:
-                    Z0_reg <= fpm_out[31:0];
-                CALC_1:
-                    M_reg  <= fpm_out[33:0];
-                default: ;
+				// IDLE: waiting for input. When a new input arrives and
+				// high-resolution mode is selected we capture the output
+				// of the combinational full-precision multiplier for the
+				// high-part multiplication (AH * BH) into Z2_reg. This
+				// value will be combined later during the Karatsuba
+				// reconstruction steps.
+				IDLE: begin
+					if (in_val && is_high_resolution)
+						Z2_reg <= fpm_out[21:0];
+				end
+
+				// CALC_0: capture low-part multiplication result (AL * BL)
+				// into Z0_reg. The multiplier is reused across cycles so
+				// we sequence the operations into registers.
+				CALC_0:
+					Z0_reg <= fpm_out[31:0];
+
+				// CALC_1: capture the middle-term (M) result produced by
+				// the second multiply (SA * SB). We store it in M_reg so
+				// the combinational reconstruction can complete in the
+				// next states.
+				CALC_1:
+					M_reg  <= fpm_out[33:0];
+
+				default: ;
             endcase
         end
     end
@@ -1038,39 +1137,74 @@ module karatsuba_multiplier (
 
         case (current_state)
             IDLE: begin
-                in_rdy = 1'b1;
-                if (in_val && !is_high_resolution) begin
-                    fpm_in_a = lo_a;
-                    fpm_in_b = lo_b;
-                    out      = {lo_out, 9'b0};
-                    out_val  = 1'b1;
-                end else if (in_val && is_high_resolution) begin
-                    fpm_in_a   = AH_ext;
-                    fpm_in_b   = BH_ext;
-                    next_state = CALC_0;
-                end
+				// In IDLE we are ready to accept new inputs
+				in_rdy = 1'b1;
+				// Low-resolution path: compute the low-part product and
+				// return a shifted result immediately (combinational).
+				if (in_val && !is_high_resolution) begin
+					fpm_in_a = lo_a;
+					fpm_in_b = lo_b;
+					out      = {lo_out, 9'b0};
+					out_val  = 1'b1; // single-cycle result available
+				end else if (in_val && is_high_resolution) begin
+					// High-resolution: start with AH * BH (high parts)
+					// and transition into the multi-cycle Karatsuba
+					// sequence. Results are captured across CALC_0..2.
+					fpm_in_a   = AH_ext;
+					fpm_in_b   = BH_ext;
+					next_state = CALC_0;
+				end
             end
             CALC_0: begin
-                fpm_in_a   = AL_ext;
-                fpm_in_b   = BL_ext;
-                next_state = CALC_1;
+				// After AH*BH completes, compute AL*BL to capture Z0.
+				fpm_in_a   = AL_ext;
+				fpm_in_b   = BL_ext;
+				next_state = CALC_1;
             end
             CALC_1: begin
-                fpm_in_a   = SA_ext;
-                fpm_in_b   = SB_ext;
-                next_state = CALC_2;
+				// Then compute SA*SB (where SA = AH+AL, SB = BH+BL)
+				// to obtain the middle product used in Karatsuba.
+				fpm_in_a   = SA_ext;
+				fpm_in_b   = SB_ext;
+				next_state = CALC_2;
             end
             CALC_2: begin
-                out     = hi_out;
-                out_val = 1'b1;
-                if (out_rdy)
-                    next_state = IDLE;
+				// Reconstruct the full product from Z0_reg, Z2_reg and
+				// the middle term M_reg. `hi_out` is the final signed
+				// 27-bit result (properly scaled). Assert `out_val`
+				// and wait for the consumer to accept it via `out_rdy`.
+				out     = hi_out;
+				out_val = 1'b1;
+				if (out_rdy)
+					next_state = IDLE;
             end
         endcase
     end
 endmodule
 
-// FSM Mandelbrot iterator — uses one karatsuba_multiplier (one 18x18 DSP)
+// FSM Mandelbrot iterator
+// ---------------------------------------------------------------
+// This module implements the fine-grained state machine that
+// performs the iterative z_{n+1} = z_n^2 + c computation for a
+// single complex point `c = in_c_r + j*in_c_i`.
+//
+// Features and contract:
+// - Uses a single `karatsuba_multiplier` to perform the required
+//   multiplications; the multiplier can operate in low-res
+//   (single-cycle) or high-res (multi-cycle Karatsuba) modes.
+// - Handshake interface:
+//     * Input: `in_val` indicates valid `in_c_r`/`in_c_i` inputs.
+//     * `in_rdy` shows module can accept a new input.
+//     * Output: when the iteration for `c` has completed the module
+//       asserts `out_val` and provides `iter_count`.
+//     * `out_rdy` must be asserted by the consumer to accept the
+//       output and allow the FSM to return to IDLE.
+// - `iter_max` bounds the iteration count (used to stop iteration).
+// - `escape_condition` asserts when the magnitude exceeds thresholds
+//   or other overflow conditions are detected.
+//
+// Timing: the FSM sequences multiply requests and consumes
+// `karatsuba_multiplier` results (`kara_out`) across states CALC_1..3.
 module fsm_iterator (
     input reset,
     input clk,
@@ -1120,29 +1254,42 @@ module fsm_iterator (
             case (current_state)
                 IDLE: begin
                     if (in_val) begin
-                        c_r <= in_c_r;
-                        c_i <= in_c_i;
-                        zi <= 27'sd0;
-                        zr <= 27'sd0;
-                        zr_sq_reg <= 27'sd0;
-                        zi_sq_reg <= 27'sd0;
-                        iter_count <= 0;
+						// Capture the complex parameter `c` and reset the
+						// iterative state (z = 0). The iterator's local
+						// squared registers are zeroed so the first set of
+						// multiply requests uses known values.
+						c_r <= in_c_r;
+						c_i <= in_c_i;
+						zi <= 27'sd0;
+						zr <= 27'sd0;
+						zr_sq_reg <= 27'sd0;
+						zi_sq_reg <= 27'sd0;
+						iter_count <= 0;
                     end
                 end
                 CALC_1: begin
-                    if (kara_out_val)
-                        zr_sq_reg <= kara_out;
+					// CALC_1: when the karatsuba multiplier returns a
+					// result, capture it as zr^2. The FSM sequences three
+					// multiply operations per iteration: zr*zr, zi*zi,
+					// and zr*zi.
+					if (kara_out_val)
+						zr_sq_reg <= kara_out;
                 end
                 CALC_2: begin
-                    if (kara_out_val)
-                        zi_sq_reg <= kara_out;
+					// CALC_2: capture zi^2 when available.
+					if (kara_out_val)
+						zi_sq_reg <= kara_out;
                 end
                 CALC_3: begin
-                    if (kara_out_val) begin
-                        zi <= zi_next;
-                        zr <= zr_next;
-                        iter_count <= iter_count + 1;
-                    end
+					// CALC_3: consume the zr*zi product and update the
+					// complex z = (zr_next, zi_next) and increment the
+					// iteration count. Note `zi_next` uses the double of
+					// (zr*zi) produced by the multiplier.
+					if (kara_out_val) begin
+						zi <= zi_next;
+						zr <= zr_next;
+						iter_count <= iter_count + 1;
+					end
                 end
                 default: ;
             endcase
@@ -1156,25 +1303,34 @@ module fsm_iterator (
 
         case (current_state)
             IDLE: begin
-                in_rdy = 1'b1;
-                if (in_val)
-                    next_state = CALC_1;
+				// Indicate readiness for a new input. When `in_val` is
+				// asserted the FSM transitions to CALC_1 to start the
+				// multiply sequence for the first z update.
+				in_rdy = 1'b1;
+				if (in_val)
+					next_state = CALC_1;
             end
             CALC_1: begin
-                if (kara_out_val)
-                    next_state = CALC_2;
+				// Wait for the multiplier to return the zr*zr result
+				// before moving to compute zi*zi.
+				if (kara_out_val)
+					next_state = CALC_2;
             end
             CALC_2: begin
-                if (kara_out_val)
-                    next_state = CALC_3;
+				// Wait for zi*zi result before computing zr*zi.
+				if (kara_out_val)
+					next_state = CALC_3;
             end
             CALC_3: begin
-                if (kara_out_val) begin
-                    if (escape_condition)
-                        next_state = DONE;
-                    else
-                        next_state = CALC_1;
-                end
+				// After the zr*zi result, decide whether the point
+				// escaped. If so go to DONE and produce an output;
+				// otherwise loop back for the next iteration.
+				if (kara_out_val) begin
+					if (escape_condition)
+						next_state = DONE;
+					else
+						next_state = CALC_1;
+				end
             end
             DONE: begin
                 out_val = 1'b1;
@@ -1192,19 +1348,27 @@ module fsm_iterator (
 
         case (current_state)
             CALC_1: begin
-                kara_a = zr; kara_b = zr;
-                kara_in_val = kara_in_rdy;
-                kara_out_rdy = 1'b1;
+				// Request zr*zr. `kara_in_val` follows the multiplier's
+				// `in_rdy` handshake so we only present inputs when the
+				// multiplier can accept them. `kara_out_rdy` tells the
+				// multiplier we're ready to consume its result.
+				kara_a = zr; kara_b = zr;
+				kara_in_val = kara_in_rdy;
+				kara_out_rdy = 1'b1;
             end
             CALC_2: begin
-                kara_a = zi; kara_b = zi;
-                kara_in_val = kara_in_rdy;
-                kara_out_rdy = 1'b1;
+				// Request zi*zi using same handshake semantics.
+				kara_a = zi; kara_b = zi;
+				kara_in_val = kara_in_rdy;
+				kara_out_rdy = 1'b1;
             end
             CALC_3: begin
-                kara_a = zr; kara_b = zi;
-                kara_in_val = kara_in_rdy;
-                kara_out_rdy = 1'b1;
+				// Request zr*zi for the cross term. The final z
+				// update uses (2*zr*zi) so the consumer will shift the
+				// multiplier output appropriately.
+				kara_a = zr; kara_b = zi;
+				kara_in_val = kara_in_rdy;
+				kara_out_rdy = 1'b1;
             end
             default: ;
         endcase
@@ -1223,6 +1387,23 @@ module fsm_iterator (
                             || (zi < $signed(-27'h1000000));
 endmodule
 
+// Top-level per-column iterator wrapper (`mandelbrot_top`)
+// ---------------------------------------------------------------
+// Each instance of `mandelbrot_top` owns the logic to step through
+// the pixels assigned to that iterator and to feed the `fsm_iterator`.
+// Responsibilities:
+// - Walk pixel coordinates assigned to this iterator (interleaved
+//   columns) in raster order (x inner, y outer).
+// - Maintain fixed-point `curr_x/curr_y` complex coordinates for the
+//   current pixel and compute `next_x/next_y` for the next pixel.
+// - Drive the `fsm_iterator` input handshake (`iterator_in_val` /
+//   `iterator_in_rdy`) and consume `iterator_out_val` when iteration
+//   finishes.
+// - When `iterator_out_val` occurs, assert `mem_we` and present the
+//   `mem_write_data`/`mem_write_address` to store the iteration count
+//   into the local M10K instance.
+// - Assert `done` when the iterator has completed all assigned
+//   pixels for the frame.
 module mandelbrot_top #(
     parameter ITERATOR_ID   = 0,
     parameter NUM_ITERATORS = 1
@@ -1300,30 +1481,47 @@ module mandelbrot_top #(
             current_state <= next_state;
             case (current_state)
                 CALC: begin
-                    if (iterator_in_rdy && !iterator_in_val) begin
-                        iterator_in_val <= 1'b1;
-                        iterator_out_rdy <= 1'b0;
-                        mem_we <= 1'b0;
-                        if (mem_write_address != 0 || pixel_x != 0 || pixel_y != 0)
-                            mem_write_address <= mem_write_address + 1;
-                    end
-                    else if (iterator_in_val) begin
-                        iterator_in_val <= 1'b0;
-                        mem_we <= 1'b0;
-                    end
-                    else if (iterator_out_val) begin
-                        iterator_out_rdy <= 1'b1;
-                        mem_we <= 1'b1;
-                        curr_x <= next_x;
-                        curr_y <= next_y;
-                        pixel_x <= next_pixel_x;
-                        pixel_y <= next_pixel_y;
-                    end
-                    else begin
-                        iterator_in_val <= 1'b0;
-                        iterator_out_rdy <= 1'b1;
-                        mem_we <= 1'b0;
-                    end
+					// Main CALC behavior: drive the handshake between the
+					// per-column controller and the `fsm_iterator` and
+					// present write requests to memory when iteration
+					// completes.
+					// * If the iterator can accept an input and we have
+					//   not already asserted `iterator_in_val`, start a
+					//   new iteration by asserting `iterator_in_val`.
+					if (iterator_in_rdy && !iterator_in_val) begin
+						iterator_in_val <= 1'b1;
+						iterator_out_rdy <= 1'b0; // not yet consuming output
+						mem_we <= 1'b0;           // no write until out_val
+						// Increment write address only after the first
+						// pixel has been processed — this implements a
+						// simple address pointer over the bank.
+						if (mem_write_address != 0 || pixel_x != 0 || pixel_y != 0)
+							mem_write_address <= mem_write_address + 1;
+					end
+					// Deassert the input-valid once the iterator has
+					// accepted it (a one-cycle pulse semantics).
+					else if (iterator_in_val) begin
+						iterator_in_val <= 1'b0;
+						mem_we <= 1'b0;
+					end
+					// Iterator has produced an output: consume it and
+					// write the iteration count into memory. Advance the
+					// pixel coordinates to the next pixel.
+					else if (iterator_out_val) begin
+						iterator_out_rdy <= 1'b1; // accept iterator output
+						mem_we <= 1'b1;           // enable write for this cycle
+						curr_x <= next_x;
+						curr_y <= next_y;
+						pixel_x <= next_pixel_x;
+						pixel_y <= next_pixel_y;
+					end
+					else begin
+						// Default: ready to accept output but not writing
+						// (preparing for the next iteration).
+						iterator_in_val <= 1'b0;
+						iterator_out_rdy <= 1'b1;
+						mem_we <= 1'b0;
+					end
                 end
                 DONE: begin
                     done <= 1'b1;
@@ -1360,6 +1558,14 @@ module mandelbrot_top #(
     end
 endmodule
 
+// Color scheme mapping
+// ---------------------------------------------------------------
+// Maps a 10-bit iteration count (`counter`) into an 8-bit packed
+// color (3:3:2-ish allocation). The mapping here is intentionally
+// simple and tiered (ranges based on fractions of `ITER_MAX`) so
+// that the display shows bands of color corresponding to escape
+// velocities. This module is combinational (stateless) and returns
+// a full 8-bit value ready for the VGA driver.
 module color_scheme #(
     parameter ITER_MAX = `ITER_MAX
 )(
@@ -1367,15 +1573,16 @@ module color_scheme #(
     input [9:0] counter,
     output reg [7:0] color_reg
 );
-    always @(*) begin
-        if      (counter >= ITER_MAX)      color_reg = 8'b_000_000_00;
-        else if (counter >= ITER_MAX >> 1) color_reg = 8'b_011_001_00;
-        else if (counter >= ITER_MAX >> 2) color_reg = 8'b_011_001_00;
-        else if (counter >= ITER_MAX >> 3) color_reg = 8'b_101_010_01;
-        else if (counter >= ITER_MAX >> 4) color_reg = 8'b_011_001_01;
-        else if (counter >= ITER_MAX >> 5) color_reg = 8'b_001_001_01;
-        else if (counter >= ITER_MAX >> 6) color_reg = 8'b_011_010_10;
-        else if (counter >= ITER_MAX >> 7) color_reg = 8'b_010_100_10;
-        else                               color_reg = 8'b_010_100_10;
-    end
+	always @(*) begin
+		// use constant comparisons for coloration to limit ALM usage
+		if      (counter >= ITER_MAX)      color_reg = 8'b_000_000_00; // inside set → black
+		else if (counter >= ITER_MAX >> 1) color_reg = 8'b_011_001_00; // very slow escape
+		else if (counter >= ITER_MAX >> 2) color_reg = 8'b_011_001_00;
+		else if (counter >= ITER_MAX >> 3) color_reg = 8'b_101_010_01;
+		else if (counter >= ITER_MAX >> 4) color_reg = 8'b_011_001_01;
+		else if (counter >= ITER_MAX >> 5) color_reg = 8'b_001_001_01;
+		else if (counter >= ITER_MAX >> 6) color_reg = 8'b_011_010_10;
+		else if (counter >= ITER_MAX >> 7) color_reg = 8'b_010_100_10;
+		else                               color_reg = 8'b_010_100_10; // fastest escapes
+	end
 endmodule
